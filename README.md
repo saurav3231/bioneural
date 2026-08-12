@@ -1,187 +1,274 @@
-# PROJECT BIONEURAL
+<div align="center">
 
-[![Creator](https://img.shields.io/badge/Creator-Saurav%20Bhandari%20%7C%20Pokhara%2C%20Nepal-blue)](https://github.com/saurav-bhandari)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Target Hardware](https://img.shields.io/badge/Hardware-RAM%20%3C%204GB%20%7C%20CPU%202.0GHz%20%7C%20Zero%20GPU-orange.svg)](docs/02_SYSTEM_REQUIREMENTS_SPECIFICATION_SRS.md)
+# 🧠 PROJECT BIONEURAL
 
-> A fully simulated biomimetic head with an autonomous hybrid brain — uniting classical neural networks
-> with the operational principles of the human brain — that behaves like a living organism.
+### A fully simulated biomimetic head with an autonomous hybrid brain
 
-**Creator & Principal Investigator:** Saurav Bhandari — Student, Pokhara, Nepal
-**Status:** `SDLC PHASE 1 — THEORETICAL RESEARCH & ARCHITECTURE STUDY` (in progress)
-**Runtime Profile:** Single-Core CPU @ 2.0 GHz · RAM < 4 GB host (active footprint < 50 MB) · Zero GPU · fully offline · no cloud · no paywall
-**License:** MIT Open-Source
+Fusing **classical deep neural networks** with the **operational principles of the human brain** —
+an event-driven, spiking, continuously-embodied artificial organism that runs sovereign and offline
+on entry-level commodity hardware.
 
----
+</div>
 
-## 1. Executive Summary
-
-PROJECT BIONEURAL is a global-standard research initiative to construct a complete computational
-organism: an embodied head endowed with a *hybrid brain* that fuses the differentiable, high-level
-representational power of classical neural networks with the event-driven, continuous-time dynamics of
-biologically inspired spiking neural networks (SNNs) and limbic/subcortical loops. The organism exists
-entirely inside software, yet behaves — sees, hears, vocalizes, and moves — as a living creature.
-
-The head possesses **full cranial embodiment**:
-
-| Modality | Capability | Biological Basis |
-|---|---|---|
-| **Vision** | Stereoscopic foveated vision | Two retinas with foveal gaze, binocular disparity |
-| **Audition** | Binaural sound localization | Tonotopic cochlear analysis, ITD/ILD cues |
-| **Vocalization** | Physical articulatory speech | Source–filter glottal + tract synthesis |
-| **Kinematics** | 18-DOF head/facial kinematics | 3-DOF neck + binocular eyes + facial articulators, vestibulo-ocular reflex (VOR) |
-| **Olfaction** | **Explicitly excluded** | Deliberate scope boundary (see FR-EXC) |
-
-No cloud. No GPU farm. No telemetry. The entire organism — brain and body — runs **on a single-core
-2.0 GHz CPU inside a hard active memory budget of less than 50 MB** (on hosts with as little as 4 GB
-of RAM), driven by spiking, event-driven, sparse computation in which **fewer than 2% of neurons are
-active at any instant**, mirroring cortical energetics and keeping the total system inside a
-**< 15 W power envelope**.
+<p align="center">
+  <a href="https://github.com/saurav3231/bioneural/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/saurav3231/bioneural/ci.yml?branch=main&label=CI&logo=github" alt="CI"></a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
+  <a href="https://github.com/saurav3231/bioneural/releases">
+    <img src="https://img.shields.io/github/v/release/saurav3231/bioneural?include_prereleases&label=release" alt="Release"></a>
+  <a href="https://github.com/saurav3231/bioneural/issues">
+    <img src="https://img.shields.io/github/issues/saurav3231/bioneural" alt="Issues"></a>
+  <a href="https://github.com/saurav3231/bioneural/stargazers">
+    <img src="https://img.shields.io/github/stars/saurav3231/bioneural?style=social" alt="Stars"></a>
+  <a href="https://github.com/saurav3231/bioneural/blob/main/CITATION.cff">
+    <img src="https://img.shields.io/badge/Citable-cff-blue.svg" alt="Citable"></a>
+  <br>
+  <img src="https://img.shields.io/badge/Creator-Saurav%20Bhandari%20%7C%20Pokhara%2C%20Nepal-blue.svg" alt="Creator">
+  <img src="https://img.shields.io/badge/Hardware-RAM%20%3C4GB%20%7C%20CPU%202.0GHz%20%7C%20Zero%20GPU-orange.svg" alt="Target Hardware">
+  <img src="https://img.shields.io/badge/Status-SDLC%20Phase%201%20%7C%20Theoretical%20Study-lightgrey.svg" alt="Status">
+</p>
 
 ---
 
-## 2. Project Manifesto
+## Table of Contents
 
-Artificial intelligence today is an expensive privilege reserved for technology giants — gated behind
-multi-gigawatt data centers, unspeakable energy bills, proprietary clouds, and opaque access. BIONEURAL
-rejects this design.
-
-### The Five Motives
-
-1. **Democratization of AI (AI for Everyone).** Advanced, autonomous, *sovereign* intelligence must be
-   a birthright of every person on Earth. BIONEURAL breaks the multi-million-dollar GPU monopoly and
-   runs entirely offline on the entry-level computers people already own — including single-core,
-   4 GB machines.
-2. **Ultra-Low Resource Footprint.** The complete organism operates within minimal CPU usage and a
-   strict active memory ceiling of **< 50 MB**, on a host requiring **RAM < 4 GB, a single-core
-   2.0 GHz CPU, and zero GPU** — less than a single web browser tab.
-3. **Environmental Sustainability.** By replacing dense matrix multiplication with biological,
-   event-driven sparse computation (< 2% active neurons), BIONEURAL eliminates the energy waste,
-   carbon emissions, grid strain, and cooling-water depletion of dense multi-GPU data centers within
-   the ~20 W metabolic envelope of the human brain.
-4. **Rejection of the Classical AI Career.** BIONEURAL rejects dense all-to-all matrix multiplication,
-   brute-force scaling laws, cloud lock-in, and disembodied statistical pattern matching in favor of
-   a physically grounded, resilient, event-driven alternative.
-5. **Beyond-Human Hybrid Architecture.** The organism bridges continuous-time spiking dynamics with
-   compact deep semantic embeddings — biological temporal efficiency plus synthetic computational
-   power — for sensory speed and multi-modal integration exceeding human biological limits.
-
-> **The Universal Access Pledge** (full text in `docs/00_PROJECT_MANIFESTO_AND_MISSION.md`):
-> Zero paywalls · Zero cloud dependencies · 100% offline sovereignty · MIT for everyone.
+- [About](#about)
+- [Cranial Capability Matrix](#cranial-capability-matrix)
+- [High-Level Architecture](#high-level-architecture)
+- [Hardware Resource Profile](#hardware-resource-profile)
+- [The Manifesto](#the-manifesto)
+- [Repository Structure](#repository-structure)
+- [Documentation](#documentation)
+- [Roadmap — SDLC Phases](#roadmap--sdlc-phases)
+- [Getting Started](#getting-started)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+- [Citation](#citation)
+- [Acknowledgments](#acknowledgments)
 
 ---
 
-## 3. Multi-Sensory (Cranial) Capability Matrix
+## About
 
-| Domain | Capability | Mechanism | Status |
+**PROJECT BIONEURAL** is a global-standard research initiative to build a complete computational
+organism: an embodied head endowed with a **hybrid brain** that unites the differentiable,
+high-level representational power of classical neural networks with the event-driven,
+continuous-time dynamics of biologically inspired **spiking neural networks (SNNs)** and
+limbic/subcortical loops. The organism exists entirely inside software, yet behaves — it sees, hears,
+vocalizes, and moves — as a living creature.
+
+Its mission, formalized in the [Project Manifesto](docs/00_PROJECT_MANIFESTO_AND_MISSION.md) and the
+[Universal Access Pledge](docs/00_PROJECT_MANIFESTO_AND_MISSION.md#4-the-universal-access-pledge), is
+founded on three motives:
+
+1. **AI for Everyone** — break the multi-million-dollar GPU monopoly and deliver sovereign,
+   high-power intelligence to anyone with an entry-level computer.
+2. **Environmental Sustainability** — replace dense matrix multiplication with biological,
+   event-driven sparse computation (< 2% active neurons) inside a < 15 W envelope.
+3. **Beyond-Human Hybrid Architecture** — combine continuous-time spiking dynamics with compact deep
+   semantic embeddings for sensory speed and multi-modal integration beyond biological limits.
+
+> **Status:** `SDLC PHASE 1 — THEORETICAL RESEARCH & ARCHITECTURE STUDY` (in progress). This
+> repository currently contains the formal research baseline: manifesto, state-of-the-art survey,
+> requirements (ISO/IEC/IEEE 29148), architecture (IEEE 42010), and roadmap (ISO/IEC 12207). No
+> implementation code exists yet — by design.
+
+---
+
+## Cranial Capability Matrix
+
+| Modality | Capability | Biological Basis | SDLC |
 |---|---|---|---|
-| **Vision** | Stereoscopic foveated vision | Binocular retinas; central fovea at high acuity + periphery low-acuity, active saccades, disparity-based depth | Phase 2 |
-| **Vision** | Eye–head coordination | 18-DOF kinematic gaze alignment + vestibulo-ocular reflex (VOR) | Phase 3 |
-| **Audition** | Binaural localization | Interaural time difference (ITD) + interaural level difference (ILD) | Phase 2 |
-| **Audition** | Tonotopic analysis | Gammatone filterbank cochlear decomposition | Phase 2 |
-| **Vocalization** | Articulatory speech | Glottal source + vocal-tract filter (Klatt/formant synthesis) | Phase 3 |
-| **Kinematics** | 18-DOF head motion | 3-DOF neck (yaw/pitch/roll) + 2×2-DOF binocular eyes + 11-DOF facial articulators | Phase 3 |
-| **Brain** | Hybrid substrate | Continuous deep substrate ⇄ continuous-time spiking SNN | Phase 1 |
-| **Brain** | Affect & drive | Limbic/subcortical loops (reward, salience, homeostasis) | Phase 4 |
-| **Olfaction** | — | **Excluded by scope (FR-EXC)** | — |
+| **Vision** | Stereoscopic foveated vision | Binocular retinas, foveal gaze, disparity depth | Phase 2 |
+| **Vision** | Eye–head coordination | 18-DOF kinematic gaze + VOR reflex | Phase 3 |
+| **Audition** | Binaural sound localization | Tonotopic cochlear analysis, ITD/ILD cues | Phase 2 |
+| **Vocalization** | Physical articulatory speech | Source–filter glottal + vocal-tract synthesis | Phase 3 |
+| **Kinematics** | 18-DOF head/facial kinematics | 3-DOF neck + binocular eyes + facial articulators | Phase 3 |
+| **Brain** | Hybrid substrate | Deep substrate ⇄ continuous-time SNN | Phase 1 |
+| **Brain** | Affect & drive | Limbic/subcortical loops (reward, salience) | Phase 4 |
+| **Olfaction** | — | **Explicitly excluded** (FR-EXC) | — |
 
 ---
 
-## 4. High-Level Architecture
+## High-Level Architecture
 
 ```
-                          ┌──────────────────────────────────────────────────┐
-                          │          THE HYBRID BRAIN (cognitive + limbic)  │
-                          │                                                  │
-                          │   ┌──────────────────────────────────────────┐   │
-                          │   │      CONTINUOUS COGNITIVE SUBSTRATE     │   │
-                          │   │  (compact deep semantic embeddings,     │   │
-                          │   │   planning, language, episodic memory)  │   │
-                          │   └──────────────────────┬────────────────────┘   │
-                          │                          │  bidirectional gating  │
-                          │                          │  (rate⇄spike codec)    │
-                          │   ┌──────────────────────▼────────────────────┐   │
-                          │   │   NEUROMORPHIC SNN SUBSTRATE (event-driven)│  │
-                          │   │  continuous-time spiking dynamics,STDP,    │  │
-                          │   │  sparse (<2% active), 3-D sensory cortex   │  │
-                          │   └──────────────────────┬────────────────────┘   │
-                          │                          │  drive / salience      │
-                          │   ┌──────────────────────▼────────────────────┐   │
-                          │   │   LIMBIC / SUBCORTICAL LOOPS              │   │
-                          │   │  reward prediction, valence, salience,    │   │
-                          │   │  homeostasis, VOR gating, arousal         │   │
-                          │   └──────────────────────┬────────────────────┘   │
-                          └──────────────────────────┼────────────────────────┘
-                                                     │  efference copies + commands
-                          ┌──────────────────────────▼────────────────────────┐
-                          │              THE EMBODIED HEAD PLANT              │
-                          │  ┌──────────┐ ┌───────────┐ ┌──────────────────┐  │
-                          │  │ FOVEA    │ │ COCHLEA   │ │ VOCAL TRACT      │  │
-                          │  │ (stereo) │ │ (binaura) │ │ source–filter    │  │
-                          │  └──────────┘ └───────────┘ └──────────────────┘  │
-                          │  ┌────────────────────────────────────────────┐  │
-                          │  │ 18-DOF KINEMATIC PLANT: 3-DOF neck +       │  │
-                          │  │ 2×2-DOF eyes + 11-DOF facial articulators  │  │
-                          │  │ (incl. VOR-stabilized binocular gaze)      │  │
-                          │  └────────────────────────────────────────────┘  │
-                          └──────────────────────────────────────────────────┘
+                    ┌──────────────────────────────────────────────────────────┐
+                    │                  THE HYBRID BRAIN                        │
+                    │  ┌──────────────────────┐   ┌──────────────────────────┐ │
+                    │  │ CONTINUOUS SUBSTRATE │   │   SNN SUBSTRATE         │ │
+                    │  │ (deep embeddings,    │◄─►│ (LIF, STDP, events,     │ │
+                    │  │  planning, language) │rate│  continuous time,       │ │
+                    │  └──────────────────────┘⇄spike│  sparse <2% active)   │ │
+                    │  ┌────────────────────────────────────────────────────┐ │
+                    │  │   LIMBIC / SUBCORTICAL LOOPS (drive, salience,     │ │
+                    │  │   VOR gating, homeostasis, efference copies)       │ │
+                    │  └────────────────────────────────────────────────────┘ │
+                    └──────────────────────────┬───────────────────────────────┘
+                                               │
+                    ┌──────────────────────────▼───────────────────────────────┐
+                    │              THE EMBODIED HEAD PLANT                     │
+                    │  ┌──────────┐  ┌───────────┐  ┌──────────────────────┐   │
+                    │  │ FOVEA    │  │ COCHLEA   │  │ VOCAL TRACT          │   │
+                    │  │ (stereo) │  │ (binaural)│  │ (source–filter voice)│   │
+                    │  └──────────┘  └───────────┘  └──────────────────────┘   │
+                    │  18-DOF PLANT: 3-DOF neck + 2×2-DOF eyes + 11-DOF face   │
+                    └────────────────────────────────────────────────────────┘
 ```
 
-**Information flow.** Sensory streams enter the SNN substrate as event-driven spike trains; the
-continuous substrate computes abstract cognition from them; limbic loops attach valence and drive;
-efference copies coordinate predictive gaze and postural control; the body actuates and generates new
-sensations — a closed, situated, animate loop.
+Full formal treatment: [System Architecture Design Document](docs/03_SYSTEM_ARCHITECTURE_DESIGN_DOCUMENT_SADD.md).
 
 ---
 
-## 5. SDLC Status Indicator
+## Hardware Resource Profile
 
-| Phase | Name | Objective | Status |
-|---|---|---|---|
-| **1** | **Theoretical Research & Architecture Study** | Manifesto, SoT-A, SRS, SADD, roadmap | **IN PROGRESS** |
-| 2 | Substrate Prototypes | SNN + deep codec, sensory front-ends | Planned |
-| 3 | Embodied Head Plant | Vision/audition/vocal/kinematics integration | Planned |
-| 4 | Hybrid Brain Integration | Limbic loops, autonomy, closed-loop behavior | Planned |
-| 5 | Physical Neuromorphic Cranium | Robotics / neuromorphic port | Planned |
+BioNeural targets hardware people **already own** — the entire organism, brain and body, in less
+memory than a single browser tab.
 
-The companion document `docs/04_SDLC_ROADMAP_AND_MILESTONES.md` specifies the full
-ISO/IEC 12207:2017 lifecycle.
-
----
-
-## 6. Hardware Resource Profile
-
-| Dimension | Requirement | Rationale |
-|---|---|---|
-| CPU | Entry-level **single-core 2.0 GHz** (x86-64/ARM64); no accelerator required | Ubiquitous and disposable; sovereignty for all |
-| System RAM | **< 4 GB host**; **active footprint < 50 MB** (process ceiling) | Runs on entry-level laptops/systems |
-| Power budget | **< 15 W** (envelope, ~20 W brain-inspired) | Fits fanless embedded / laptop operation |
-| Storage | < 250 MB (model + state) | Fits SD card / flash |
-| Network | **None required** | 100% offline sovereignty (NFR-SOV) |
-| GPU / NPU | **Zero — explicitly not required** | No accelerator dependency (NFR-PERF) |
-| Compute discipline | **Sparse event-driven; < 2% active neurons** | Biological efficiency |
-| Real-time tick | < 15 ms per cognitive cycle | Meets native sensorimotor latencies |
-
----
-
-## 7. Document Map
-
-| Document | Purpose |
+| Dimension | Requirement |
 |---|---|
-| `docs/00_PROJECT_MANIFESTO_AND_MISSION.md` | Philosophical whitepaper: the privilege gap, ecological crisis, the ~20 W biological brain, Pokhara/global accessibility vision, Universal Access Pledge |
-| `docs/01_RESEARCH_FOUNDATIONS_AND_STATE_OF_THE_ART.md` | Academic research survey: classical vs. sparse AI, hybrid bridge mathematics, sensory-motor physics, comparative benchmark tables |
-| `docs/02_SYSTEM_REQUIREMENTS_SPECIFICATION_SRS.md` | ISO/IEC/IEEE 29148:2018 requirements baseline (FR-* and NFR-*) |
-| `docs/03_SYSTEM_ARCHITECTURE_DESIGN_DOCUMENT_SADD.md` | IEEE 42010:2011 architecture description, 4+1 views, single-core CPU/memory budgets |
-| `docs/04_SDLC_ROADMAP_AND_MILESTONES.md` | ISO/IEC 12207:2017 five-phase R&D lifecycle |
+| CPU | Entry-level **single-core 2.0 GHz** (x86-64 / ARM64) |
+| System RAM | **< 4 GB** host · **< 50 MB** active footprint |
+| GPU / NPU | **Zero** — not required, not used |
+| Power | **< 15 W** envelope (brain-inspired ~20 W metabolism) |
+| Storage | < 250 MB (model + state) |
+| Network | **None** — 100% offline sovereignty |
+| Real-time tick | < 15 ms per cognitive cycle |
 
 ---
 
-## 8. Quick Reference
+## The Manifesto
 
-- **Repository:** `A:\bioneural` (foundational documentation — Phase 1)
-- **Creator & PI:** Saurav Bhandari (Student, Pokhara, Nepal)
-- **Language of record:** English (ISO/IEC/IEEE compliant templates)
-- **License:** MIT Open-Source — free to use, modify, and distribute (see `LICENSE`)
-- **Contact of intent:** through the issue tracker of this repository
+> *"No intelligence worth keeping is the monopoly of those who can afford the fire."*
 
-> *"No intelligence worth keeping is the monopoly of those who can afford the fire." — Project BioNeural*
+Project BioNeural is a declaration of independence from centralized, cloud-locked, environmentally
+destructive AI. It is engineered so that **sovereignty is a physical property of the artifact**:
+zero paywalls, zero cloud dependencies, 100% offline operation, under the **MIT License** — for every
+person on Earth. Read the full manifesto:
+[`docs/00_PROJECT_MANIFESTO_AND_MISSION.md`](docs/00_PROJECT_MANIFESTO_AND_MISSION.md).
+
+---
+
+## Repository Structure
+
+```
+bioneural/
+├── .github/                  # Issue/PR templates, CI workflow, community health files
+├── docs/                     # Formal research & engineering baseline (Phase 1)
+│   ├── 00_PROJECT_MANIFESTO_AND_MISSION.md
+│   ├── 01_RESEARCH_FOUNDATIONS_AND_STATE_OF_THE_ART.md
+│   ├── 02_SYSTEM_REQUIREMENTS_SPECIFICATION_SRS.md
+│   ├── 03_SYSTEM_ARCHITECTURE_DESIGN_DOCUMENT_SADD.md
+│   └── 04_SDLC_ROADMAP_AND_MILESTONES.md
+├── scripts/                  # Repository validation & tooling
+├── src/bioneural/            # Package scaffold (implementation begins Phase 2)
+└── tests/                    # Test suite (Phase 1: package metadata smoke test)
+├── CITATION.cff              # Academic citation metadata
+├── LICENSE                   # MIT Open-Source License
+└── pyproject.toml            # Package metadata (author: Saurav Bhandari)
+```
+
+---
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [00 — Project Manifesto & Mission](docs/00_PROJECT_MANIFESTO_AND_MISSION.md) | Philosophical whitepaper: the privilege gap, ecological crisis, ~20 W brain, Universal Access Pledge |
+| [01 — Research Foundations & SoT-A](docs/01_RESEARCH_FOUNDATIONS_AND_STATE_OF_THE_ART.md) | Dense AI vs. sparse SNNs, hybrid bridge mathematics, sensory-motor physics, benchmarks |
+| [02 — System Requirements (SRS)](docs/02_SYSTEM_REQUIREMENTS_SPECIFICATION_SRS.md) | ISO/IEC/IEEE 29148 formal requirements (FR-\*/NFR-\*) |
+| [03 — Architecture (SADD)](docs/03_SYSTEM_ARCHITECTURE_DESIGN_DOCUMENT_SADD.md) | IEEE 42010 architecture description, 4+1 views, budget tables |
+| [04 — SDLC Roadmap & Milestones](docs/04_SDLC_ROADMAP_AND_MILESTONES.md) | ISO/IEC 12207 five-phase R&D lifecycle |
+
+See the [docs index](docs/README.md) for an overview.
+
+---
+
+## Roadmap — SDLC Phases
+
+| Phase | Name | Status |
+|---|---|---|
+| **1** | **Theoretical Research & Architecture Study** | **In progress** |
+| 2 | Substrate Prototypes (SNN + deep, sensory front-ends) | Planned |
+| 3 | Embodied Head Plant (vision, audition, voice, 18-DOF) | Planned |
+| 4 | Hybrid Brain Integration (limbic loops, autonomy) | Planned |
+| 5 | Physical Neuromorphic Cranium | Planned |
+
+---
+
+## Getting Started
+
+> **Note:** This is Phase 1 — a documentation/research baseline. There is no executable code yet.
+> The full 5-phase lifecycle is defined in
+> [`docs/04_SDLC_ROADMAP_AND_MILESTONES.md`](docs/04_SDLC_ROADMAP_AND_MILESTONES.md).
+
+```console
+git clone https://github.com/saurav3231/bioneural.git
+cd bioneural
+# Phase 1: repository validation
+python scripts/validate_repo.py
+```
+
+Python requirement: **3.9+** (validated against the metadata in `pyproject.toml`).
+
+---
+
+## Contributing
+
+Contributions are welcome — research feedback, requirement clarifications, architecture review, and
+(Phase 2 onward) code. Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** and
+**[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** before opening an issue or pull request.
+
+- Found a defect or gap? [Open an issue](https://github.com/saurav3231/bioneural/issues/new/choose).
+- Ready to help? Read the [roadmap](docs/04_SDLC_ROADMAP_AND_MILESTONES.md) and pick an open task.
+
+---
+
+## Security
+
+Please report security vulnerabilities privately per our
+**[SECURITY.md](SECURITY.md)** responsible-disclosure policy. Do **not** open a public issue for
+security defects.
+
+---
+
+## License
+
+This project is licensed under the **MIT License** —
+© 2026 Saurav Bhandari (Pokhara, Nepal) & Project BioNeural Consortium.
+See [LICENSE](LICENSE) for the full text.
+
+---
+
+## Citation
+
+If you use BioNeural research in academic work, please cite it:
+
+```bibtex
+@software{bioneural,
+  author  = {Bhandari, Saurav and {Project BioNeural Consortium}},
+  title   = {Project BioNeural: A Biomimetic Head with an Autonomous Hybrid Brain},
+  year    = {2026},
+  url     = {https://github.com/saurav3231/bioneural},
+  license = {MIT}
+}
+```
+
+Machine-readable metadata: [`CITATION.cff`](CITATION.cff).
+
+---
+
+## Acknowledgments
+
+- **Saurav Bhandari** — Creator & Principal Investigator (Pokhara, Nepal)
+- The global open-source and neuromorphic computing research communities that make sovereign AI
+  possible.
+
+---
+
+<p align="center">
+  <sub>Project BioNeural is dedicated to the people of Pokhara, Nepal, and to every learner in the
+  world who deserves intelligence they can hold in their own hands.</sub>
+</p>

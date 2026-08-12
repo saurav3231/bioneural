@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Project Documentation
+    url: https://github.com/saurav3231/bioneural/tree/main/docs
+    about: Read the formal documentation before opening an issue.
+  - name: Security
+    url: https://github.com/saurav3231/bioneural/blob/main/SECURITY.md
+    about: Please report security vulnerabilities privately — not as public issues.

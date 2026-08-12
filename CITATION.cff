@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use Project BioNeural research in your work, please cite it as follows."
+title: "Project BioNeural: A Biomimetic Head with an Autonomous Hybrid Brain"
+type: software
+abstract: >-
+  A fully simulated biomimetic head with an autonomous hybrid brain uniting classical deep neural
+  networks with the operational principles of the human brain (continuous-time spiking neural
+  networks and limbic/subcortical loops). Embodied with stereoscopic foveated vision, binaural sound
+  localization, physical articulatory vocal synthesis, and 18-DOF kinematics with vestibulo-ocular
+  reflex. Runs sovereign, offline, on entry-level commodity hardware (RAM < 4 GB, single-core
+  2.0 GHz CPU, zero GPU, < 50 MB active footprint) within a < 15 W envelope.
+authors:
+  - family-names: Bhandari
+    given-names: Saurav
+    orcid: ""
+    affiliation: "Pokhara, Nepal"
+    email: "bhandarisaurav15@gmail.com"
+  - name: "Project BioNeural Consortium"
+version: "0.1.0-alpha"
+date-released: "2026-08-12"
+license: MIT
+url: "https://github.com/saurav3231/bioneural"
+repository-code: "https://github.com/saurav3231/bioneural"
+keywords:
+  - neuromorphic
+  - spiking-neural-networks
+  - hybrid-ai
+  - biomimetic
+  - foveated-vision
+  - binaural-audio
+  - articulatory-speech
+  - sustainable-ai
+  - sovereign-ai

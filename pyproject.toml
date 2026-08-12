@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bioneural"
 version = "0.1.0-alpha"
-description = "Project BioNeural: a fully simulated biomimetic head with an autonomous hybrid brain (continuous deep substrate x continuous-time spiking neural networks), running sovereign and offline on entry-level commodity hardware (< 4 GB RAM, single-core 2.0 GHz CPU, zero GPU, < 50 MB active footprint)."
+description = "Project BioNeural: a fully simulated biomimetic head with an autonomous hybrid brain (continuous deep substrate x continuous-time spiking neural networks), running sovereign and offline on entry-level commodity hardware (RAM < 4 GB, single-core 2.0 GHz CPU, zero GPU, < 50 MB active footprint)."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -13,7 +13,7 @@ authors = [
     { name = "Saurav Bhandari", email = "bhandarisaurav15@gmail.com" },
 ]
 maintainers = [
-    { name = "Project BioNeural Consortium", email = "consortium@bioneural.local" },
+    { name = "Project BioNeural Consortium", email = "bhandarisaurav15@gmail.com" },
 ]
 keywords = [
     "neuromorphic", "spiking-neural-networks", "hybrid-ai", "biomimetic",
@@ -27,16 +27,33 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "black>=24.0",
+    "isort>=5.13",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pre-commit>=3.6",
+]
+
 [project.urls]
-Homepage = "https://github.com/saurav-bhandari/bioneural"
-Documentation = "https://github.com/saurav-bhandari/bioneural/blob/main/README.md"
-Source = "https://github.com/saurav-bhandari/bioneural"
+Homepage = "https://github.com/saurav3231/bioneural"
+Documentation = "https://github.com/saurav3231/bioneural/blob/main/README.md"
+Source = "https://github.com/saurav3231/bioneural"
+Changelog = "https://github.com/saurav3231/bioneural/blob/main/CHANGELOG.md"
+Issues = "https://github.com/saurav3231/bioneural/issues"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["bioneural*"]
 
 [tool.setuptools.package-data]
@@ -52,3 +69,7 @@ line_length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true

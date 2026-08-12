@@ -1,0 +1,12 @@
+# CODEOWNERS - default reviewers for changes
+
+# Every change is reviewed by the Project Lead
+* @saurav3231
+
+# Formal standards documents require explicit maintainer review
+docs/*.md @saurav3231
+
+# CI and tooling
+.github/ @saurav3231
+scripts/ @saurav3231
+pyproject.toml @saurav3231
