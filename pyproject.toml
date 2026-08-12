@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bioneural"
+version = "0.1.0-alpha"
+description = "Project BioNeural: a fully simulated biomimetic head with an autonomous hybrid brain (continuous deep substrate x continuous-time spiking neural networks), running sovereign and offline on entry-level commodity hardware (< 4 GB RAM, single-core 2.0 GHz CPU, zero GPU, < 50 MB active footprint)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Saurav Bhandari", email = "bhandarisaurav15@gmail.com" },
+]
+maintainers = [
+    { name = "Project BioNeural Consortium", email = "consortium@bioneural.local" },
+]
+keywords = [
+    "neuromorphic", "spiking-neural-networks", "hybrid-ai", "biomimetic",
+    "foveated-vision", "binaural-audio", "articulatory-speech", "sustainable-ai",
+    "edge-ai", "sovereign-ai",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+[project.urls]
+Homepage = "https://github.com/saurav-bhandari/bioneural"
+Documentation = "https://github.com/saurav-bhandari/bioneural/blob/main/README.md"
+Source = "https://github.com/saurav-bhandari/bioneural"
+
+[tool.setuptools.packages.find]
+include = ["bioneural*"]
+
+[tool.setuptools.package-data]
+bioneural = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
