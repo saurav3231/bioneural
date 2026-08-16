@@ -97,20 +97,19 @@ def ternary_matmul(
 # ---------------------------------------------------------------------------
 def ternary_matmul_triton(
     x: torch.Tensor,
-    w_latent: torch.Tensor,
+    w_t: torch.Tensor,
     config: QuantConfig | None = None,
 ) -> torch.Tensor | None:
     """Triton-accelerated ternary matmul. Returns None if Triton/CUDA is unavailable.
 
-    The kernel loads fp16 latent shadows, thresholds them inside the block (cheap compares),
-    and accumulates in fp16 via tensor cores. Block-sparsity comes from the caller batching only
-    the columns that received events (column-batched execution).
+    `w_t` is the already-materialized fp16 ternary weight (values -1/0/+1 scaled by their
+    per-group scale). The kernel thresholds nothing; it just does a block-sparse fp16 GEMM on
+    the caller's cached materialization.
     """
-    cfg = config or QuantConfig()
     is_vector = x.dim() == 1
     if is_vector:
         x = x.unsqueeze(0)
-    if not (x.is_cuda and w_latent.is_cuda):
+    if not (x.is_cuda and w_t.is_cuda):
         return None
     try:
         import triton
@@ -119,10 +118,6 @@ def ternary_matmul_triton(
         return None
     if x.dtype != torch.float16:
         x = x.to(torch.float16)
-
-    w_t, _ = materialize_ternary(
-        w_latent, group_size=cfg.group_size, deadzone=cfg.deadzone, scale_mode=cfg.scale_mode
-    )
 
     @triton.jit
     def _ternary_kernel(

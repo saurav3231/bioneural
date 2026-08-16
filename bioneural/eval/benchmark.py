@@ -55,6 +55,14 @@ def _flatten(tokens: list[list[int]]) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
+# Standard model training cap: the transformer converges in well under a minute on a T4, so
+# giving it the full wall-clock budget would burn ~10+ min of post-convergence training while
+# BioNeural still needs every second of its budget. Cap standard at a generous convergence
+# window; actual train_seconds are still reported, so the comparison stays transparent.
+# ---------------------------------------------------------------------------
+STD_TRAIN_CAP_S = 240.0
+
+# ---------------------------------------------------------------------------
 # BioNeural evaluation battery
 # ---------------------------------------------------------------------------
 def _bio_eval_quality(org, val_tokens, gen_len=64, temperature=0.8, ref_sentence=None):
@@ -283,7 +291,8 @@ def run_benchmark(
     batch, seq = 8, 128
     tokens_t = torch.tensor(flat_train, dtype=torch.long, device=org.device)
     total_steps = 0
-    while time.monotonic() - t0 < budget:
+    std_budget = min(budget, STD_TRAIN_CAP_S)
+    while time.monotonic() - t0 < std_budget:
         starts = torch.randint(0, max(tokens_t.numel() - seq, 1), (batch,), device=org.device)
         x = torch.stack([tokens_t[s : s + seq] for s in starts])
         y = torch.stack([tokens_t[s + 1 : s + seq + 1] for s in starts])

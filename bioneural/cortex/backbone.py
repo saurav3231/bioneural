@@ -54,7 +54,7 @@ class EventSSM(nn.Module):
         err = r_next - self.pred_ctx
         # local gradient for W_out: dL/dW_out ~ outer(err, h); W_out is (dim_in, dim)
         grad = torch.einsum("i,j->ij", err, self.h.detach())
-        self.W_out.update_latent(grad, lr=self.lcfg.lr_predict * mod)
+        self.W_out.update_latent(grad, lr=self.lcfg.lr_predict * mod, count_flips=False)
         # adaptive forget: remember more when surprised (prediction error is high)
         surprise = float(err.abs().mean().item())
         self.forget.data = torch.clamp(

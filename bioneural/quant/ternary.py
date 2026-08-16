@@ -32,21 +32,20 @@ class TernaryParam(nn.Module):
             self.latent *= mask
         self.register_buffer("version", torch.tensor(0, dtype=torch.long))
         self.register_buffer("flip_count", torch.tensor(0, dtype=torch.long))
-        self._cache: tuple[int, torch.Tensor, torch.Tensor] | None = None
+        self._cache: torch.Tensor | None = None
         self._flip_bookkeeping = torch.tensor(0.0)
 
     # ------------------------------------------------------------------
     def _materialized(self) -> torch.Tensor:
-        ver = int(self.version.item())
-        if self._cache is None or self._cache[0] != ver:
+        if self._cache is None:
             w_t, _ = materialize_ternary(
                 self.latent,
                 group_size=self.config.group_size,
                 deadzone=self.config.deadzone,
                 scale_mode=self.config.scale_mode,
             )
-            self._cache = (ver, w_t.detach())
-        return self._cache[1]
+            self._cache = w_t.detach()
+        return self._cache
 
     # ------------------------------------------------------------------
     def materialized(self) -> torch.Tensor:
@@ -58,7 +57,7 @@ class TernaryParam(nn.Module):
         w = self._materialized()
         if x.device != w.device:
             w = w.to(x.device)
-        out = ternary_matmul_triton(x, self.latent, self.config)
+        out = ternary_matmul_triton(x, w, self.config)
         if out is None:
             if x.dtype != torch.float16:
                 x = x.to(torch.float16)
@@ -66,18 +65,24 @@ class TernaryParam(nn.Module):
         return out.float()
 
     # ------------------------------------------------------------------
-    def update_latent(self, grad: torch.Tensor, lr: float = 1.0) -> int:
+    def update_latent(self, grad: torch.Tensor, lr: float = 1.0, count_flips: bool = True) -> int:
         """Accumulate a local (backprop-free) gradient into the latent shadows.
 
         Returns the number of ternary flips this update caused (a stability diagnostic).
+        `count_flips=False` skips the two full-matrix sign passes (hot path).
         """
         g = grad.to(self.latent.dtype) * lr
-        old = self._ternary_signs()
-        self.latent = self.latent + g
-        new = self._ternary_signs()
-        flips = int((old != new).sum().item())
-        self.flip_count += flips
+        flips = 0
+        if count_flips:
+            old = self._ternary_signs()
+            self.latent = self.latent + g
+            new = self._ternary_signs()
+            flips = int((old != new).sum().item())
+            self.flip_count += flips
+        else:
+            self.latent = self.latent + g
         self.version += 1
+        self._cache = None
         return flips
 
     def _ternary_signs(self) -> torch.Tensor:
@@ -89,6 +94,7 @@ class TernaryParam(nn.Module):
     def apply_decay(self, factor: float) -> None:
         self.latent = self.latent * factor
         self.version += 1
+        self._cache = None
 
     def stats(self) -> dict[str, float]:
         w = self._materialized()

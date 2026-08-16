@@ -97,9 +97,11 @@ class BioNeural(nn.Module):
             out = self.columns.forward(tv, gate)
             readout_acc = readout_acc + out["readout"]
             if out["n_active"] > 0:
-                for pos, cid in enumerate(out["idx"].tolist()):
-                    for ni in out["fire"][pos].nonzero(as_tuple=False).flatten().tolist():
-                        self.event_bus.emit(cid, ni, magnitude=1.0)
+                fired = torch.nonzero(out["fire"], as_tuple=False)
+                if fired.numel() > 0:
+                    cids = out["idx"][fired[:, 0]]
+                    for cid, ni in torch.stack([cids, fired[:, 1]], dim=1).tolist():
+                        self.event_bus.emit(int(cid), int(ni), magnitude=1.0)
             self.event_bus.advance(1.0)
             self._pred_ready = True
 
@@ -278,6 +280,7 @@ class BioNeural(nn.Module):
             if mask.any().item():
                 mod.latent = torch.where(mask, torch.zeros_like(latent), latent)
                 mod.version += 1
+                mod._cache = None
                 pruned += int(mask.sum().item())
         return pruned
 

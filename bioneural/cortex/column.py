@@ -76,8 +76,9 @@ class ColumnLayer(nn.Module):
         # instrumentation
         self.ticks_run = 0
         self.total_active_cols = 0
-        self.total_fires = 0
+        self.register_buffer("fires_acc", torch.zeros(()))
         self.register_buffer("_arange_k", torch.arange(neurons_per_column))
+        self._conn_dirty = False
 
     # ------------------------------------------------------------------
     def _refresh_conn(self) -> None:
@@ -103,8 +104,10 @@ class ColumnLayer(nn.Module):
         Returns a dict with `readout` ((readout_dim,) contribution), `fire`, `potential`,
         and instrumentation.
         """
-        self._refresh_conn()
         x = x.detach().float()
+        if self._conn_dirty:
+            self._refresh_conn()
+            self._conn_dirty = False
         active_inputs = x != 0
         col_active = (self.in_conn & active_inputs).any(dim=1)
         idx = col_active.nonzero(as_tuple=False).flatten()
@@ -147,7 +150,7 @@ class ColumnLayer(nn.Module):
         self.theta[idx] = theta_new
         self.trace[idx] = trace_new
         self.prev_fire[idx] = fire.float()
-        self.total_fires += int(fire.sum().item())
+        self.fires_acc += fire.sum()
 
         # ---- predictive coding: predict the NEXT tick input from this state ----
         fire_vec = fire.float()
@@ -186,7 +189,7 @@ class ColumnLayer(nn.Module):
         lr = self.lcfg.lr_predict * mod * self.lcfg.mod_gate_strength
         grad_full = torch.zeros_like(self.W_pred.latent)
         grad_full[rows] = grad
-        self.W_pred.update_latent(grad_full, lr=lr)
+        self.W_pred.update_latent(grad_full, lr=lr, count_flips=False)
         return float(err.abs().sum().item())
 
     # ------------------------------------------------------------------
@@ -213,7 +216,7 @@ class ColumnLayer(nn.Module):
     def stats(self) -> dict[str, float]:
         return {
             "active_cols_frac": (self.total_active_cols / max(self.ticks_run * self.c, 1)),
-            "fires_per_tick": self.total_fires / max(self.ticks_run, 1),
+            "fires_per_tick": float(self.fires_acc.item()) / max(self.ticks_run, 1),
             "firing_rate_mean": float(self.rate.mean().item()),
             "w_in_density": self.W_in.stats()["density"],
             "w_rec_density": self.W_rec.stats()["density"],
@@ -227,6 +230,7 @@ class ColumnLayer(nn.Module):
         self.prev_fire.zero_()
         self.last_pred.zero_()
         self.last_fire.zero_()
+        self.fires_acc.zero_()
         self.ticks_run = 0
         self.total_active_cols = 0
         self.total_fires = 0
