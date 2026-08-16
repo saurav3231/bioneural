@@ -1,6 +1,7 @@
 # =============================================================================
 # BioNeural — QUALITY CHECK (windowed vs legacy, SAME token budget)
 # =============================================================================
+# ruff: noqa: E402  (imports must follow the clone/install steps in a Kaggle cell)
 # The real question is whether the batched path learns as well per token as the
 # legacy path. All configs train the SAME number of tokens on the same text and
 # are evaluated identically; ppl ~ vocab (=1024) means NO learning yet, so if a
