@@ -99,6 +99,12 @@ class EventSSM(nn.Module):
             self.W_out._clamp_mask()
             self.W_out.version += 1
             self.W_out._cache = None
+            # local predictive update for the state projection W_in (also untrained before this):
+            # to reduce the reconstruction error, h should move by dh = W_outᵀ·err, and the
+            # readout input r_t caused that state, so dW_in ∝ (dh ⊗ r) (predictive coding, local).
+            dh = err @ self.W_out.materialized().float()  # (W, dim)
+            grad_in = (dh.t() @ r.detach().float()) / w  # (dim, rd)
+            self.W_in.update_latent(grad_in, lr=self.lcfg.lr_predict * mod, count_flips=False)
             surprise = err.abs().mean()
             s = float(surprise.item())
             self.forget.data = torch.clamp(

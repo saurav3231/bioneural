@@ -149,7 +149,7 @@ class BioNeural(nn.Module):
         gate = self.bus.gate()
         self.readout.learn(ctx, int(next_tok_id), mod=gate)
         delta = ctx.detach().float() - self.emb.weight[next_tok_id]
-        self.emb.weight[next_tok_id] = self.emb.weight[next_tok_id] + delta * (0.02 * gate)
+        self.emb.weight[next_tok_id] = self.emb.weight[next_tok_id] + delta * (0.04 * gate)
         self.emb.weight[next_tok_id] /= self.emb.weight[next_tok_id].norm() + 1e-8
 
         ne = float(min(1.0, self.surprise.value))
@@ -268,7 +268,7 @@ class BioNeural(nn.Module):
         # map (like tied embeddings), so the cortex gets structured, learnable input features.
         ys_t = torch.tensor(ys, dtype=torch.long, device=self.device)
         delta = ctx.detach().float() - self.emb.weight[ys_t]
-        self.emb.weight.index_add_(0, ys_t, (delta * (0.02 * gate)).to(self.emb.weight.dtype))
+        self.emb.weight.index_add_(0, ys_t, (delta * (0.04 * gate)).to(self.emb.weight.dtype))
         touched = torch.unique(ys_t)
         self.emb.weight[touched] = (
             self.emb.weight[touched] / (self.emb.weight[touched].norm(dim=1, keepdim=True) + 1e-8)
