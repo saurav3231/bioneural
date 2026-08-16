@@ -221,6 +221,8 @@ def run_benchmark(
     i = 0
     seq_len = 64
     n = len(flat_train) - seq_len
+    ev = {"ppl": float("nan"), "acc": float("nan")}
+    last_report = 0.0
     while time.monotonic() - t0 < budget:
         seg = flat_train[i : i + seq_len]
         org.train_sequence(seg)
@@ -232,6 +234,14 @@ def run_benchmark(
             bio_curves["loss"].append(ev["nll"])
             bio_curves["acc"].append(ev["acc"])
             bio_curves["steps"].append(org.total_tokens)
+        if time.monotonic() - last_report >= 20.0:
+            last_report = time.monotonic()
+            print(
+                f"  [bio] t={time.monotonic() - t0:6.0f}s "
+                f"tokens={org.total_tokens:7d} tok/s={org.total_tokens / max(time.monotonic() - t0, 1e-9):7.1f} "
+                f"val_ppl={ev['ppl']:.2f}",
+                flush=True,
+            )
     train_dt = time.monotonic() - t0
     energy_bio = meter.stop()
 
@@ -292,6 +302,7 @@ def run_benchmark(
     tokens_t = torch.tensor(flat_train, dtype=torch.long, device=org.device)
     total_steps = 0
     std_budget = min(budget, STD_TRAIN_CAP_S)
+    last_report = 0.0
     while time.monotonic() - t0 < std_budget:
         starts = torch.randint(0, max(tokens_t.numel() - seq, 1), (batch,), device=org.device)
         x = torch.stack([tokens_t[s : s + seq] for s in starts])
@@ -307,6 +318,14 @@ def run_benchmark(
             std_curves["loss"].append(ev["nll"])
             std_curves["acc"].append(ev["acc"])
             std_curves["steps"].append(total_steps * batch * seq)
+        if time.monotonic() - last_report >= 20.0:
+            last_report = time.monotonic()
+            print(
+                f"  [std] t={time.monotonic() - t0:6.0f}s "
+                f"tokens={total_steps * batch * seq:9d} tok/s={(total_steps * batch * seq) / max(time.monotonic() - t0, 1e-9):7.1f} "
+                f"val_ppl={ev['ppl']:.2f}",
+                flush=True,
+            )
     std_train_dt = time.monotonic() - t0
     energy_std = meter.stop()
     std_eval = std_model.evaluate(val_toks, max_batches=200)
