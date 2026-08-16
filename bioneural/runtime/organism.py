@@ -148,6 +148,9 @@ class BioNeural(nn.Module):
         correct = pred == next_tok_id
         gate = self.bus.gate()
         self.readout.learn(ctx, int(next_tok_id), mod=gate)
+        delta = ctx.detach().float() - self.emb.weight[next_tok_id]
+        self.emb.weight[next_tok_id] = self.emb.weight[next_tok_id] + delta * (0.02 * gate)
+        self.emb.weight[next_tok_id] /= self.emb.weight[next_tok_id].norm() + 1e-8
 
         ne = float(min(1.0, self.surprise.value))
         reward = 1.0 if correct else 0.0
@@ -258,6 +261,18 @@ class BioNeural(nn.Module):
         preds = logits.argmax(dim=-1).tolist()  # one sync per window
         correct = sum(1 for p, y in zip(preds, ys, strict=False) if p == y)
         self.readout.learn_batch(ctx, ys, mod=gate)
+
+        # embedding learning: the token that was PREDICTED moves toward the state that
+        # predicted it (emb[x_{t+1}] += lr·(ctx_t − emb[x_{t+1}])). Local Hebbian rule that
+        # makes input and output embeddings converge to the same "token -> internal state"
+        # map (like tied embeddings), so the cortex gets structured, learnable input features.
+        ys_t = torch.tensor(ys, dtype=torch.long, device=self.device)
+        delta = ctx.detach().float() - self.emb.weight[ys_t]
+        self.emb.weight.index_add_(0, ys_t, (delta * (0.02 * gate)).to(self.emb.weight.dtype))
+        touched = torch.unique(ys_t)
+        self.emb.weight[touched] = (
+            self.emb.weight[touched] / (self.emb.weight[touched].norm(dim=1, keepdim=True) + 1e-8)
+        ).to(self.emb.weight.dtype)
 
         # sparse codes + novelty (batched)
         sdcs = make_sdc_batch(r, active_frac=0.05, ternary=True)
