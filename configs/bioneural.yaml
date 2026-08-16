@@ -1,0 +1,66 @@
+vocab_size: 1024
+token_dim: 256
+spike_ticks: 3
+k_active_per_tick: 8
+batch_size: 8
+log_every: 20
+seed: 0
+device: auto
+
+quant:
+  group_size: 64
+  deadzone: 0.15
+  scale_mode: mean
+  use_kernel: true
+
+cortex:
+  num_columns: 64
+  neurons_per_column: 128
+  input_dim: 256
+  readout_dim: 256
+  leak_bits: 4
+  theta_delta_plus: 0.05
+  theta_delta_minus: 0.002
+  target_rate: 0.03
+  wta_k: 8
+  backbone_dim: 128
+  backbone_layers: 1
+
+learning:
+  lr_homeo: 0.01
+  lr_predict: 0.05
+  lr_hebb: 0.02
+  lr_readout: 0.1
+  trace_decay: 0.95
+  mod_gate_strength: 1.0
+  shadow_update: 0.05
+
+memory:
+  m0_ring_size: 4096
+  m1_slots: 32
+  m1_decay: 0.9
+  m2a_capacity: 256
+  m2a_sim_threshold: 0.55
+  m2b_max_engrams: 4096
+  m2b_k: 8
+  m3_max_concepts: 1024
+
+workspace:
+  n_slots: 16
+  wsa_k: 4
+
+time:
+  n_freq: 12
+  base_hz: 1.0
+  max_hz: 0.000011574
+
+drives:
+  initiate_threshold: 0.75
+
+eval:
+  train_budget_minutes: 15.0
+  dataset: tiny-stories
+  max_examples: 2000
+  max_val_examples: 200
+  gen_length: 64
+  eval_every_steps: 50

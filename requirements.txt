@@ -1,0 +1,16 @@
+# Core
+torch>=2.1
+numpy>=1.24
+datasets>=2.14
+tokenizers>=0.15
+matplotlib>=3.7
+pyyaml>=6.0
+
+# GPU / speed (required on the Kaggle T4 for full kernel path)
+triton>=2.2
+nvidia-ml-py>=12.535
+psutil>=5.9
+
+# Dev / CI
+pytest>=7.4
+ruff>=0.4
