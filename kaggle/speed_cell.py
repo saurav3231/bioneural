@@ -18,6 +18,7 @@ import time
 
 REPO_URL = "https://github.com/saurav3231/bioneural.git"
 REPO_DIR = "/kaggle/working/bioneural"
+WINDOW = 64  # tokens per batched step (0 = legacy one-token path)
 
 print("==> GPU check:")
 import torch
@@ -60,6 +61,7 @@ print(f"    triton_kernel_path_armed={kernels.triton is not None}")
 # ---- 4. synthetic token stream ----
 cfg = BioNeuralConfig()
 cfg.device = "cuda"
+cfg.batch_window = WINDOW
 rng = random.Random(0)
 flat = [rng.randrange(cfg.vocab_size) for _ in range(4000)]
 

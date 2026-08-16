@@ -25,11 +25,11 @@ from bioneural.cortex.column import ColumnLayer
 from bioneural.cortex.event_bus import EventBus
 from bioneural.cortex.qeu import async_leak
 from bioneural.drives.homeostat import DriveEngine, DriveSignals
-from bioneural.io.spikes import spike_encode
+from bioneural.io.spikes import spike_encode, spike_encode_batch
 from bioneural.learning.homeostat import apply_synaptic_scaling
 from bioneural.learning.predictive import SurpriseTracker
 from bioneural.learning.readout import ReadoutHead
-from bioneural.memory.codes import make_sdc, sdc_similarity
+from bioneural.memory.codes import make_sdc, make_sdc_batch, sdc_similarity, sdc_similarity_batch
 from bioneural.memory.fabric import MemoryFabric
 from bioneural.neuromod.bus import NeuromodBus
 from bioneural.time.clock import ClockBank
@@ -175,6 +175,8 @@ class BioNeural(nn.Module):
 
     def train_sequence(self, token_ids: list[int]) -> dict:
         """Train on a sequence of tokens; returns aggregate metrics over the sequence."""
+        if self.cfg.batch_window >= 2:
+            return self._train_sequence_windowed(token_ids)
         correct = 0
         n = 0
         total_ne = 0.0
@@ -188,6 +190,114 @@ class BioNeural(nn.Module):
             "n": n,
             "ne_mean": total_ne / max(n, 1),
         }
+
+    def _train_sequence_windowed(self, token_ids: list[int]) -> dict:
+        w = self.cfg.batch_window
+        correct = 0
+        n = 0
+        total_ne = 0.0
+        for i in range(0, len(token_ids) - 1, w):
+            seg = token_ids[i : i + w + 1]
+            if len(seg) < 2:
+                break
+            out = self.train_window(seg, window=w)
+            correct += int(round(out["acc"] * out["n"]))
+            total_ne += out["ne_mean"] * out["n"]
+            n += out["n"]
+        return {
+            "acc": correct / max(n, 1),
+            "n": n,
+            "ne_mean": total_ne / max(n, 1),
+        }
+
+    def train_window(self, token_ids: list[int], window: int = 64) -> dict:
+        """Batched training: `window` tokens flow through the neural path per GPU op.
+
+        Packet approximation on the columns (each tick's contributions summed per column before
+        the QEU threshold step) + a closed-form backbone recurrence + scatter-add readout learning
+        + a batched memory flush. This replaces ~120 per-token torch ops with a handful per
+        window, which is what the T4's launch-latency floor demands.
+        """
+        w = min(window, len(token_ids) - 1)
+        if w < 1:
+            return {"acc": 0.0, "n": 0, "ne_mean": 0.0}
+        xs = token_ids[:w]
+        ys = token_ids[1 : w + 1]
+        xids = torch.tensor(xs, dtype=torch.long, device=self.device)
+        embs = self.emb.weight[xids]  # (W, D)
+        bursts = spike_encode_batch(embs, self.cfg.spike_ticks, self.cfg.k_active_per_tick)
+        gate = self.bus.gate()
+
+        readout = torch.zeros(w, self.c.readout_dim, device=self.device)
+        pred_errs: list[torch.Tensor] = []
+        for tv in bursts:
+            out = self.columns.forward_batch(tv, gate, learn=True)
+            readout += out["readout"]
+            if out["pred_err"] is not None:
+                pred_errs.append(out["pred_err"])
+            self.event_bus.advance(1.0)
+
+        if pred_errs:
+            ne_col = float(torch.stack(pred_errs).mean().item())  # one sync per window
+            self.surprise.update(ne_col)
+
+        # backbone: closed-form linear recurrence over the whole window
+        r = readout
+        h, bsurp = self.backbone.window(r, learn=True, mod=gate)
+        if bsurp is not None:
+            self.surprise.update(float(bsurp.item()))
+        ctx = r + 0.5 * self.backbone.context_batch(h)
+
+        # readout head: batched forward + contrastive learn
+        logits = self.readout.forward_batch(ctx).float()
+        preds = logits.argmax(dim=-1).tolist()  # one sync per window
+        correct = sum(1 for p, y in zip(preds, ys, strict=False) if p == y)
+        self.readout.learn_batch(ctx, ys, mod=gate)
+
+        # sparse codes + novelty (batched)
+        sdcs = make_sdc_batch(r, active_frac=0.05, ternary=True)
+        if w > 1:
+            sims = sdc_similarity_batch(sdcs[:-1], sdcs[1:])
+            novelties = [0.5] + [1.0 - s for s in sims]
+        else:
+            novelties = [0.5]
+
+        # workspace + memory (per-window, batched flush)
+        self.workspace.compete([sdcs[-1]], [novelties[-1]])
+        if self._prev_sdc is not None and w > 1:
+            keys = torch.cat([self._prev_sdc.unsqueeze(0), sdcs[:-1]], dim=0)
+        else:
+            keys = sdcs
+        self.fabric.write_experience_batch(keys, sdcs, novelties, self.bus.broadcast())
+
+        # neuromodulators / drives / stats
+        ne = float(min(1.0, self.surprise.value))
+        novelty_mean = sum(novelties) / max(w, 1)
+        reward = correct / max(w, 1)
+        self.bus.from_signals(ne, reward, novelty_mean, stability=max(0.0, 1.0 - ne))
+        self._acc_ema = 0.98 * self._acc_ema + 0.02 * reward
+        self.drives.update(
+            DriveSignals(
+                surprise=ne,
+                reward=reward,
+                novelty=novelty_mean,
+                failure_signature=1.0 - self._acc_ema,
+                activity=1.0,
+            )
+        )
+
+        self._prev_r = r[-1].detach()
+        self._prev_sdc = sdcs[-1].detach()
+        self._last_ctx = ctx[-1]
+        self.total_tokens += w
+        self.total_correct += correct
+
+        self._steps_since_homeo += w
+        if self._steps_since_homeo >= 50:
+            apply_synaptic_scaling(self.columns, self.c.target_rate)
+            self._steps_since_homeo = 0
+
+        return {"acc": correct / max(w, 1), "n": w, "ne_mean": ne}
 
     # ==================================================================
     # inference / generation

@@ -42,6 +42,36 @@ def sdc_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
     return float(agree / union)
 
 
+def make_sdc_batch(
+    vecs: torch.Tensor,
+    active_frac: float = 0.05,
+    k: int | None = None,
+    ternary: bool = True,
+) -> torch.Tensor:
+    """Vectorized `make_sdc` for a `(W, n)` batch -> `(W, n)` int8 SDCs (one op for the whole window)."""
+    vecs = vecs.detach().float().flatten(1)
+    w, n = vecs.shape
+    if k is None:
+        k = max(1, int(round(n * active_frac)))
+    k = min(k, n)
+    topk = vecs.abs().topk(k, dim=1).indices  # (W, k)
+    code = torch.zeros(w, n, dtype=torch.int8, device=vecs.device)
+    code.scatter_(1, topk, 1)
+    if ternary:
+        botk = (-vecs.abs()).topk(k, dim=1).indices
+        code.scatter_(1, botk, -1)
+    return code
+
+
+def sdc_similarity_batch(a: torch.Tensor, b: torch.Tensor) -> list[float]:
+    """Vectorized `sdc_similarity` over aligned rows; one host round-trip for the window."""
+    a = a.to(torch.int16)
+    b = b.to(torch.int16)
+    agree = (a * b > 0).sum(dim=1).float()
+    union = ((a != 0) | (b != 0)).sum(dim=1).float() + 1e-9
+    return (agree / union).tolist()
+
+
 def pack_bits(code: torch.Tensor) -> bytes:
     """Pack a binary (+1/0) SDC into bytes (for the ~48-64 B/engram episodic store)."""
     code = (code > 0).to(torch.uint8)

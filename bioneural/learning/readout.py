@@ -41,6 +41,55 @@ class ReadoutHead(nn.Module):
         return ctx.to(torch.float16) @ self.W.T  # (vocab,)
 
     # ------------------------------------------------------------------
+    def normalize_batch(self, ctx: torch.Tensor) -> torch.Tensor:
+        return ctx / (ctx.norm(dim=1, keepdim=True) + 1e-8)
+
+    def forward_batch(self, ctx: torch.Tensor) -> torch.Tensor:
+        """Logits for a (W, dim) batch of contexts -> (W, vocab)."""
+        ctx = self.normalize_batch(ctx)
+        return ctx.to(torch.float16) @ self.W.T
+
+    def learn_batch(
+        self,
+        ctx: torch.Tensor,
+        y_pos: list[int],
+        n_neg: int = 4,
+        mod: float = 1.0,
+    ) -> list[list[int]]:
+        """Contrastive local update for a whole window (many tokens per GPU op).
+
+        Returns the negative samples per token. Semantics match `learn` (positive push toward the
+        observed token + negative pull away from sampled counterfactuals, normalized per row) but
+        the whole window is applied with scatter-adds instead of a per-token Python loop.
+        """
+        ctx = self.normalize_batch(ctx).to(torch.float16)
+        ys = torch.tensor(y_pos, dtype=torch.long, device=ctx.device)
+        w = ctx.shape[0]
+
+        # positive phase
+        lr = self.lcfg.lr_readout * mod / (1.0 + self.count[ys].sqrt())  # (W,)
+        ys_idx = ys[:, None].expand(w, self.dim_in)
+        self.W.scatter_add_(0, ys_idx, (ctx.float() * lr[:, None]).to(torch.float16))
+        self.W[ys] = (self.W[ys] / (self.W[ys].norm(dim=1, keepdim=True) + 1e-8)).to(
+            torch.float16
+        )
+        self.count[ys] += 1
+
+        # negative phase (counterfactual pull-away, sampled per token)
+        negs = torch.randint(0, self.vocab_size - 1, (w, n_neg), device=ctx.device)
+        negs = torch.where(negs >= ys[:, None], negs + 1, negs)  # avoid the positive class
+        neg_ids = negs.reshape(-1)
+        neg_ctx = ctx.repeat_interleave(n_neg, dim=0) * (self.lcfg.lr_readout * mod)
+        self.W.scatter_add_(
+            0, neg_ids[:, None].expand(-1, self.dim_in), (-neg_ctx).to(torch.float16)
+        )
+        uniq = neg_ids.unique()
+        self.W[uniq] = (self.W[uniq] / (self.W[uniq].norm(dim=1, keepdim=True) + 1e-8)).to(
+            torch.float16
+        )
+        return negs.tolist()
+
+    # ------------------------------------------------------------------
     def positive_phase(self, ctx: torch.Tensor, y_pos: int, mod: float = 1.0) -> None:
         ctx = self.normalize(ctx).to(torch.float16)
         lr = self.lcfg.lr_readout * mod / (1.0 + self.count[y_pos].sqrt().item())

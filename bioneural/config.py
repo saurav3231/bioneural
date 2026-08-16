@@ -103,6 +103,7 @@ class BioNeuralConfig:
     log_every: int = 20
     seed: int = 0
     device: str = "auto"
+    batch_window: int = 0  # >1 enables the batched training path (many tokens per GPU op)
 
     quant: QuantConfig = field(default_factory=QuantConfig)
     cortex: CortexConfig = field(default_factory=CortexConfig)

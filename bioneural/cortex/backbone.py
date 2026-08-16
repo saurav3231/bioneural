@@ -63,6 +63,56 @@ class EventSSM(nn.Module):
         self.decay_history.append(surprise)
         return surprise
 
+    def window(
+        self, r: torch.Tensor, learn: bool = True, mod: float = 1.0
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Batched window pass over the linear recurrence (many tokens per GPU op).
+
+        h_t = a ⊙ h_{t-1} + W_in.forward(r_t), a = 1 - sigmoid(forget), has the closed form
+        h_t = a^t ⊙ h_prev + Σ_{i<=t} a^{t-i} ⊙ b_i (b_i = W_in.forward(r_i)), evaluated with a
+        single triangular einsum over the whole window instead of a per-token loop.
+
+        Returns `(h_window (W, dim), surprise (0-d or None))`. The recurrence state `h` carries
+        the window's last state so consecutive windows stay connected.
+        """
+        w = r.shape[0]
+        r_proj = self.W_in.forward(r)  # (W, dim)
+        a = 1.0 - torch.sigmoid(self.forget)  # (dim,)
+        tidx = torch.arange(w, device=r.device)
+        offs = tidx[:, None] - tidx[None, :]
+        amask = (offs >= 0).float()
+        a_off = (
+            a.reshape(1, 1, -1).pow(offs.clamp(min=0).float()[..., None]) * amask[..., None]
+        )  # (W, W, dim)
+        h_contrib = torch.einsum("wid,id->wd", a_off, r_proj)  # (W, dim)
+        pow_t = a[None, :].pow(tidx.float()[:, None])  # (W, dim)
+        h_prev = self.h.detach().clone()
+        h = h_contrib + pow_t * h_prev[None, :]  # (W, dim)
+
+        surprise = None
+        if learn:
+            h_prev_cat = torch.cat([h_prev[None, :], h[:-1]], dim=0)  # (W, dim)
+            ctx_prev = self.W_out.forward(h_prev_cat)
+            err = r - ctx_prev
+            grad = torch.einsum("wd,wi->di", err, h_prev_cat)  # (rd, dim)
+            self.W_out.latent = self.W_out.latent + grad * (self.lcfg.lr_predict * mod)
+            self.W_out._clamp_mask()
+            self.W_out.version += 1
+            self.W_out._cache = None
+            surprise = err.abs().mean()
+            s = float(surprise.item())
+            self.forget.data = torch.clamp(
+                self.forget.data + self.lcfg.lr_homeo * mod * (s - 0.3), -4.0, 1.0
+            )
+            self.decay_history.append(s)
+
+        self.h = h[-1].detach()
+        return h, surprise
+
+    def context_batch(self, h: torch.Tensor) -> torch.Tensor:
+        """Recurrent state window projected back into readout space."""
+        return self.W_out.forward(h.detach())
+
     def reset(self) -> None:
         self.h.zero_()
         self.pred_ctx = None

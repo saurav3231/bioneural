@@ -159,6 +159,117 @@ class ColumnLayer(nn.Module):
         }
 
     # ------------------------------------------------------------------
+    def _predictive_batch_err(
+        self,
+        xa: torch.Tensor,
+        adims: torch.Tensor,
+        col_active: torch.Tensor,
+        mod: float,
+    ) -> torch.Tensor:
+        active = self.last_fire.any(dim=1)
+        lidx = active.nonzero(as_tuple=False).flatten()
+        if lidx.numel() == 0:
+            return torch.zeros((), device=self.v.device)
+        lrows = self._rows_for(lidx)
+        lp = self.last_pred[lidx][:, adims]  # (n_lact, n_a)
+        lmask = col_active[:, lidx].float()  # (W, n_lact)
+        err = xa[:, None, :] - lp[None, :, :]  # (W, n_lact, n_a)
+        grad = torch.einsum("ak,wai->aki", self.last_fire[lidx], err * lmask[:, :, None])
+        lr = self.lcfg.lr_predict * mod * self.lcfg.mod_gate_strength
+        self.W_pred.latent[lrows[:, :, None], adims[None, None, :]] += lr * grad
+        self.W_pred.latent *= self.W_pred.mask
+        self.W_pred.version += 1
+        self.W_pred._cache = None
+        return err.abs().mean()
+
+    def forward_batch(
+        self, x: torch.Tensor, mod: float = 1.0, learn: bool = True
+    ) -> dict[str, torch.Tensor]:
+        """Advance the layer for one tick of sparse inputs for a `(W, input_dim)` window.
+
+        Packet approximation: the W tokens' events for this tick are summed per active column
+        before the QEU threshold step (one fixed-point step per tick per column instead of W), and
+        each column's readout contribution is distributed back to tokens by their event energy.
+        """
+        x = x.detach().float()
+        w = x.shape[0]
+        active_inputs = x != 0
+        col_active = (self.in_conn[None, :, :] & active_inputs[:, None, :]).any(dim=-1)  # (W, C)
+        idx = col_active.any(dim=0).nonzero(as_tuple=False).flatten()
+        n_act = int(idx.numel())
+        self.ticks_run += 1
+        self.total_active_cols += n_act
+
+        readout = torch.zeros(w, self.readout_dim, device=self.v.device)
+        if n_act == 0:
+            return {
+                "readout": readout,
+                "fire": torch.zeros(0, device=self.v.device),
+                "n_active": 0,
+                "idx": idx,
+                "pred_err": None,
+            }
+
+        rows = self._rows_for(idx)
+        adims = active_inputs.any(dim=0).nonzero(as_tuple=False).flatten()
+        xa = x[:, adims].to(torch.float16)  # (W, n_a) — fp16 to match the materialized weights
+        win = self.W_in.materialized()[rows][:, :, adims]  # (n_act, K, n_a)
+        contrib = torch.einsum("aki,wi->wak", win, xa)  # (W, n_act, K)
+        cmask = col_active[:, idx].float()  # (W, n_act)
+
+        if learn:
+            pred_err = self._predictive_batch_err(xa, adims, col_active, mod)
+        else:
+            pred_err = None
+
+        # ---- local recurrence (packet: contributions summed across the window) ----
+        prev_fire = self.prev_fire[idx]
+        wrec = self.W_rec.materialized()[rows]
+        contrib_rec = (wrec * prev_fire[:, None, :]).sum(-1)
+        packet = (contrib * cmask[:, :, None]).sum(0) + contrib_rec  # (n_act, K)
+
+        v_new, theta_new, trace_new, _rd, fire, potential = advance_qeu_tensors(
+            self.v[idx].to(torch.int32),
+            self.theta[idx].to(torch.int32),
+            self.trace[idx].to(torch.int32),
+            packet,
+            leak_bits=self.cfg.leak_bits,
+            theta_delta_plus=self.cfg.theta_delta_plus,
+            theta_delta_minus=self.cfg.theta_delta_minus,
+            wta_k=self.cfg.wta_k,
+        )
+        self.v[idx] = v_new
+        self.theta[idx] = theta_new
+        self.trace[idx] = trace_new
+        fire_f = fire.float()
+        self.prev_fire[idx] = fire_f
+        self.rate[idx] = self.rate[idx] * 0.99 + fire_f * 0.01
+        self.fires_acc += fire.sum()
+
+        # prediction for the NEXT tick
+        wpred = self.W_pred.materialized()[rows][:, :, adims]
+        pred_here = (wpred * fire_f[:, :, None]).sum(1)  # (n_act, n_a)
+        self.last_pred[idx[:, None], adims[None, :]] = pred_here
+        self.last_fire[idx] = fire_f
+
+        # ---- per-token readout via energy-weighted column shares ----
+        ob = self.out_basis.materialized()[rows]  # (n_act, K, rd)
+        col_ro = (ob * fire_f[:, :, None]).sum(1)  # (n_act, rd)
+        share = (contrib.abs().sum(-1) * cmask)  # (W, n_act)
+        share = share / (share.sum(dim=0, keepdim=True) + 1e-8)
+        readout = share @ col_ro  # (W, rd)
+
+        return {
+            "readout": readout,
+            "fire": fire,
+            "potential": potential,
+            "n_active": n_act,
+            "idx": idx,
+            "cmask": cmask,
+            "pred_err": pred_err,
+        }
+
+    # ------------------------------------------------------------------
     def learn_predictive(self, x_next: torch.Tensor, mod: float = 1.0) -> float:
         """Predictive-coding update: error vs the prediction made last tick (local target).
 

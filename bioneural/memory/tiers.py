@@ -119,6 +119,16 @@ class FastWeights:
         self.strength.append(mod)
         self.writes += 1
 
+    def write_precloned(self, key: torch.Tensor, value: torch.Tensor, mod: float = 1.0) -> None:
+        """Same as `write` but the caller already owns fresh clones (batched fast path)."""
+        if len(self.keys) >= self.capacity:
+            i = min(range(len(self.strength)), key=lambda j: self.strength[j])
+            del self.keys[i], self.values[i], self.strength[i]
+        self.keys.append(key)
+        self.values.append(value)
+        self.strength.append(mod)
+        self.writes += 1
+
     def recall(self, key: torch.Tensor) -> torch.Tensor | None:
         best = -1.0
         best_val = None
@@ -175,6 +185,32 @@ class EpisodicLog:
             time=time.time(),
             key_bytes=blob,
             key=key.clone(),
+            mod_snapshot=mod_snapshot or {},
+            links=links or [],
+            payload_meta=meta,
+        )
+        if len(self.engrams) >= self.max_engrams:
+            if self.spill_dir is not None:
+                self._spill(e)
+                self.spilled += 1
+            else:
+                self.engrams.pop(0)
+        else:
+            self.engrams.append(e)
+
+    def add_precloned(
+        self,
+        key: torch.Tensor,
+        blob: bytes,
+        mod_snapshot: dict | None = None,
+        links: list | None = None,
+        meta: str = "",
+    ) -> None:
+        """Same as `add` with the packed bytes pre-computed (batched fast path)."""
+        e = Engram(
+            time=time.time(),
+            key_bytes=blob,
+            key=key,
             mod_snapshot=mod_snapshot or {},
             links=links or [],
             payload_meta=meta,
