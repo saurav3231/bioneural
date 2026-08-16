@@ -94,30 +94,21 @@ def ternary_matmul(
 
 # ---------------------------------------------------------------------------
 # Triton CUDA kernel (the hand-tuned T4 path)
+#
+# The kernel is defined ONCE at module scope. A `@triton.jit` closure created
+# fresh on every call can force a full recompile per invocation (~200-300 ms on
+# a T4), which would dominate the token budget. Module-scope definition means
+# the kernel is JIT-compiled exactly once per specialization, then cached.
 # ---------------------------------------------------------------------------
-def ternary_matmul_triton(
-    x: torch.Tensor,
-    w_t: torch.Tensor,
-    config: QuantConfig | None = None,
-) -> torch.Tensor | None:
-    """Triton-accelerated ternary matmul. Returns None if Triton/CUDA is unavailable.
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - triton is optional
+    triton = None  # type: ignore[assignment]
+    tl = None  # type: ignore[assignment]
 
-    `w_t` is the already-materialized fp16 ternary weight (values -1/0/+1 scaled by their
-    per-group scale). The kernel thresholds nothing; it just does a block-sparse fp16 GEMM on
-    the caller's cached materialization.
-    """
-    is_vector = x.dim() == 1
-    if is_vector:
-        x = x.unsqueeze(0)
-    if not (x.is_cuda and w_t.is_cuda):
-        return None
-    try:
-        import triton
-        import triton.language as tl
-    except Exception:
-        return None
-    if x.dtype != torch.float16:
-        x = x.to(torch.float16)
+
+if triton is not None:
 
     @triton.jit
     def _ternary_kernel(
@@ -157,6 +148,34 @@ def ternary_matmul_triton(
             w_ptrs += BLOCK_K * stride_wk
         out_ptrs = O_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on
         tl.store(out_ptrs, acc, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
+
+
+else:
+
+    def _ternary_kernel(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("triton unavailable")
+
+
+def ternary_matmul_triton(
+    x: torch.Tensor,
+    w_t: torch.Tensor,
+    config: QuantConfig | None = None,
+) -> torch.Tensor | None:
+    """Triton-accelerated ternary matmul. Returns None if Triton/CUDA is unavailable.
+
+    `w_t` is the already-materialized fp16 ternary weight (values -1/0/+1 scaled by their
+    per-group scale). The kernel thresholds nothing; it just does a block-sparse fp16 GEMM on
+    the caller's cached materialization.
+    """
+    is_vector = x.dim() == 1
+    if is_vector:
+        x = x.unsqueeze(0)
+    if not (x.is_cuda and w_t.is_cuda):
+        return None
+    if triton is None:
+        return None
+    if x.dtype != torch.float16:
+        x = x.to(torch.float16)
 
     b, k = x.shape
     m, n = w_t.shape
