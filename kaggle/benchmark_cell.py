@@ -1,7 +1,7 @@
 # =============================================================================
 # BioNeural — KAGGLE BENCHMARK · PASTE THIS WHOLE FILE INTO ONE CELL
 # =============================================================================
-# 1) After you run `.\push.ps1 bioneural public`, set REPO_URL to your repo.
+# 1) REPO_URL below already points at saurav3231/bioneural.
 # 2) Paste this cell into a Kaggle notebook with GPU T4x2 accelerator.
 # 3) Run. It clones, installs, trains both models for `MINUTES` and writes a
 #    detailed report to /kaggle/working/results/<run>/ (report.md, report.json,
@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-REPO_URL = "https://github.com/YOUR_USERNAME/bioneural.git"  # <-- SET THIS
+REPO_URL = "https://github.com/saurav3231/bioneural.git"
 REPO_DIR = "/kaggle/working/bioneural"
 MINUTES = 15  # mid-time benchmark budget per model (matched wall-clock)
 DATASET = "tiny-stories"  # tiny-stories | wikitext-2 | synthetic
