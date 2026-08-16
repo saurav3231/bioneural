@@ -8,7 +8,6 @@
 # =============================================================================
 # ruff: noqa: E402
 
-import math
 import os
 import subprocess
 import sys
