@@ -1,6 +1,7 @@
 # =============================================================================
 # BioNeural — QUALITY x SPEED SWEEP · paste into ONE Kaggle cell (GPU T4)
 # =============================================================================
+# ruff: noqa: E402  (imports must follow the clone/install steps in a Kaggle cell)
 # For each batched window size, trains the real 8.2M model on REAL TinyStories
 # text (falls back to synthetic if HF is unavailable) and reports throughput AND
 # held-out quality together, so you can pick the window that is fastest WITHOUT
