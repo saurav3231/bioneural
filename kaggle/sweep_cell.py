@@ -1,11 +1,12 @@
 # =============================================================================
-# BioNeural — QUALITY x SPEED SWEEP · paste into ONE Kaggle cell (GPU T4)
+# BioNeural — QUALITY CHECK (windowed vs legacy, SAME token budget)
 # =============================================================================
-# ruff: noqa: E402  (imports must follow the clone/install steps in a Kaggle cell)
-# For each batched window size, trains the real 8.2M model on REAL TinyStories
-# text (falls back to synthetic if HF is unavailable) and reports throughput AND
-# held-out quality together, so you can pick the window that is fastest WITHOUT
-# losing ppl/acc. A legacy (window=0) row is included at reduced budget for scale.
+# The real question is whether the batched path learns as well per token as the
+# legacy path. All configs train the SAME number of tokens on the same text and
+# are evaluated identically; ppl ~ vocab (=1024) means NO learning yet, so if a
+# row's ppl is far above the others that config's sample-efficiency regressed.
+# Legacy is ~150x slower, so it sets the budget (bump TRAIN_TOK up to ~5000 if
+# you want to see ppl drop below random, but legacy will take longer).
 # =============================================================================
 
 import os
@@ -16,10 +17,9 @@ import time
 REPO_URL = "https://github.com/saurav3231/bioneural.git"
 REPO_DIR = "/kaggle/working/bioneural"
 
-TRAIN_TOK = 2000  # tokens each config trains on
-EVAL_TOK = 200  # held-out tokens evaluated (legacy eval is per-token, keep small)
-LEGACY_TRAIN_TOK = 300  # legacy path is ~300x slower; small budget only
-WINDOWS = [64, 128, 256]
+TRAIN_TOK = 2400  # SAME budget for every config (legacy needs ~3.5 min at ~11 tok/s)
+EVAL_TOK = 200  # held-out tokens evaluated (legacy eval is per-token; keep small)
+WINDOWS = [0, 64, 128, 256]
 
 print("==> GPU check:")
 import torch
@@ -67,23 +67,22 @@ flat_val = [x for t in val_texts for x in tok.encode(t)][:EVAL_TOK]
 print(f"    tokenizer vocab={cfg_vocab} train_tokens={len(flat_train)} val_tokens={len(flat_val)}")
 
 
-def run(batch_window: int, train_n: int) -> dict:
+def run(batch_window: int) -> dict:
     cfg = BioNeuralConfig()
     cfg.device = "cuda"
     cfg.vocab_size = cfg_vocab
     cfg.batch_window = batch_window
     org = BioNeural(cfg)
-    seg = flat_train[:train_n]
+    seg = flat_train[:TRAIN_TOK]
     _sync()
     t0 = time.monotonic()
     org.train_sequence(seg)
     _sync()
     dt = time.monotonic() - t0
-    tps = (train_n - 1) / dt
+    tps = (TRAIN_TOK - 1) / dt
     ev = org.evaluate(flat_val)
     return {
         "window": batch_window,
-        "trained": train_n,
         "tok_s": tps,
         "ppl": ev["ppl"],
         "acc": ev["acc"],
@@ -91,30 +90,19 @@ def run(batch_window: int, train_n: int) -> dict:
     }
 
 
-rows = []
-# legacy reference (slow)
-rows.append(run(0, LEGACY_TRAIN_TOK))
-for w in WINDOWS:
-    rows.append(run(w, TRAIN_TOK))
+rows = [run(w) for w in WINDOWS]
+legacy = rows[0]
 
 print()
 print("=" * 66)
-print(f"  {'window':>6} {'trained':>8} {'tok/s':>9} {'ppl':>8} {'top1':>6}")
+print(f"  {'window':>6} {'tok/s':>9} {'ppl':>9} {'top1':>6} {'ppl/legacy':>10}")
 print("=" * 66)
 for r in rows:
+    ratio = r["ppl"] / max(legacy["ppl"], 1e-9)
     print(
-        f"  {r['window']:>6} {r['trained']:>8} {r['tok_s']:>9.0f} "
-        f"{r['ppl']:>8.2f} {r['acc']:>6.3f}"
+        f"  {r['window']:>6} {r['tok_s']:>9.0f} {r['ppl']:>9.2f} "
+        f"{r['acc']:>6.3f} {ratio:>10.3f}"
     )
 print("=" * 66)
-batched = rows[1:]
-best_ppl = min(r["ppl"] for r in batched)
-pick = None
-for r in batched:
-    if r["ppl"] <= best_ppl * 1.05 and (pick is None or r["tok_s"] > pick["tok_s"]):
-        pick = r
-print(
-    f"  suggested window: {pick['window']}  "
-    f"(tok/s={pick['tok_s']:.0f}, ppl={pick['ppl']:.2f})"
-)
-print("  = largest window whose ppl stays within 5% of the best-ppl config.")
+print("  ppl/legacy = 1.0 means the batched path learns AS WELL as legacy per token.")
+print("  >1.5 -> the packet approximation is hurting sample-efficiency; reduce the window.")
