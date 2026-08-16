@@ -26,7 +26,7 @@ from bioneural.eval.metrics import (
 )
 from bioneural.eval.standard_model import StandardTransformer
 from bioneural.io.tokenizer import build_tokenizer
-from bioneural.memory.codes import sdc_similarity
+from bioneural.memory.codes import make_sdc, sdc_similarity
 from bioneural.runtime.organism import BioNeural
 
 SEED = 0
@@ -90,8 +90,13 @@ def _one_shot_retention(org, toks_fact, checkpoints=(8, 16, 32), rng=None):
     key = sdcs[len(sdcs) // 2]
     value = sdcs[-1]
     org.fabric.m2a.write(key, value, mod=1.0)
-    # control: similarity of a random unrelated sdc to the value
-    control = rng.random()
+    # control: similarity of an unrelated *random SDC of the same sparsity* to the stored value
+    rand_code = make_sdc(
+        torch.randn(org.c.readout_dim, device=value.device),
+        active_frac=0.05,
+        ternary=True,
+    )
+    control = sdc_similarity(rand_code, value)
     scores = {}
     for ck in checkpoints:
         for _ in range(ck):
@@ -124,6 +129,9 @@ def _idle_test(org, simulated_seconds=600.0):
 def _autonomy_test(org, n_tries=10):
     org.drives.last_user_interaction = time.time() - 3600 * 3
     org.drives.drives["social"] = 0.9
+    # clear cooldowns so the observation window can actually see initiations
+    org.drives.last_initiation = 0.0
+    org.last_act_time = 0.0
     acts = []
     for _ in range(n_tries):
         a = org.act_autonomously(generate_fn=lambda ctx, temp: org.readout.imagine(ctx, temp))
@@ -251,8 +259,8 @@ def run_benchmark(
     retention = _one_shot_retention(
         org, tokenizer.encode("the zebra eats green cheese and the owl watches")
     )
-    idle = _idle_test(org)
     autonomy = _autonomy_test(org)
+    idle = _idle_test(org)
     stability = _stability(org)
     ret_lat = _retrieval_latency_ms(org)
     sleep_info = org.sleep_cycle(replay_n=32)

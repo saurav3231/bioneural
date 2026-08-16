@@ -122,7 +122,13 @@ class BioNeural(nn.Module):
         self.workspace.broadcast([sdc])
         self.workspace.elaborate(self.fabric, sdc)
         if learn and self._prev_sdc is not None:
-            self.fabric.write_experience(self._prev_sdc, sdc, self.bus.broadcast(), meta="tok")
+            self.fabric.write_experience(
+                self._prev_sdc,
+                sdc,
+                self.bus.broadcast(),
+                meta="tok",
+                episodic=novelty >= 0.3,
+            )
 
         self._prev_r = r.detach()
         self._prev_sdc = sdc.detach()

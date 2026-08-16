@@ -45,11 +45,16 @@ class MemoryFabric:
         value: torch.Tensor,
         mod: dict[str, float] | None = None,
         meta: str = "",
+        episodic: bool = True,
     ) -> None:
-        """Write one experience across M1 (working), M2a (one-shot) and M2b (life log)."""
+        """Write one experience across M1 (working), M2a (one-shot) and M2b (life log).
+
+        `episodic=False` updates working/one-shot memory but skips the life-log (novelty gating).
+        """
         self.m1.write(key, value, aCh=(mod or {}).get("ACh", 0.5))
         self.m2a.write(key, value, mod=(mod or {}).get("DA", 0.5))
-        self.m2b.add(key, mod, meta=meta)
+        if episodic:
+            self.m2b.add(key, mod, meta=meta)
         self.m1.tick()
 
     def recall(self, key: torch.Tensor) -> dict:

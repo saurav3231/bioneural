@@ -21,15 +21,25 @@ class TernaryParam(nn.Module):
     """A ternary weight matrix parameterized by latent shadow magnitudes."""
 
     def __init__(
-        self, shape: tuple[int, int], config: QuantConfig | None = None, sparsity: float = 0.0
+        self,
+        shape: tuple[int, int],
+        config: QuantConfig | None = None,
+        sparsity: float = 0.0,
+        mask: torch.Tensor | None = None,
+        max_abs: float = 0.5,
     ):
         super().__init__()
         self.shape = tuple(shape)
         self.config = config or QuantConfig()
+        self.max_abs = max_abs
         self.register_buffer("latent", torch.randn(shape) * 0.05)
-        if sparsity > 0:
-            mask = torch.rand(shape) > sparsity
-            self.latent *= mask
+        if mask is not None:
+            self.register_buffer("mask", mask.bool())
+            self.latent *= self.mask
+        elif sparsity > 0:
+            m = torch.rand(shape) > sparsity
+            self.register_buffer("mask", m)
+            self.latent *= self.mask
         self.register_buffer("version", torch.tensor(0, dtype=torch.long))
         self.register_buffer("flip_count", torch.tensor(0, dtype=torch.long))
         self._cache: torch.Tensor | None = None
@@ -81,6 +91,7 @@ class TernaryParam(nn.Module):
             self.flip_count += flips
         else:
             self.latent = self.latent + g
+        self._clamp_mask()
         self.version += 1
         self._cache = None
         return flips
@@ -93,8 +104,16 @@ class TernaryParam(nn.Module):
     # ------------------------------------------------------------------
     def apply_decay(self, factor: float) -> None:
         self.latent = self.latent * factor
+        self._clamp_mask()
         self.version += 1
         self._cache = None
+
+    def _clamp_mask(self) -> None:
+        """Enforce the magnitude bound + structural sparsity mask (keeps density fixed)."""
+        if self.max_abs is not None:
+            self.latent = self.latent.clamp(-self.max_abs, self.max_abs)
+        if hasattr(self, "mask"):
+            self.latent = self.latent * self.mask
 
     def stats(self) -> dict[str, float]:
         w = self._materialized()

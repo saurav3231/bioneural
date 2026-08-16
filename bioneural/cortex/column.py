@@ -18,11 +18,6 @@ from bioneural.cortex.qeu import advance_qeu_tensors
 from bioneural.quant.ternary import TernaryParam
 
 
-def _build_sparse_conn(shape: tuple[int, int], sparsity: float, seed: int) -> torch.Tensor:
-    g = torch.Generator().manual_seed(seed)
-    return torch.rand(shape, generator=g) > sparsity
-
-
 class ColumnLayer(nn.Module):
     """All cortical columns as one block-sparse layer."""
 
@@ -44,20 +39,22 @@ class ColumnLayer(nn.Module):
         self.input_dim = input_dim
         self.readout_dim = readout_dim
 
-        self.W_in = TernaryParam((num_columns * neurons_per_column, input_dim), sparsity=0.85)
+        # receptive-field input routing: column c reads dims {i : i*C//D == c}. A burst of
+        # ~k_active dims therefore lights up only ~k_active columns (block-sparse by construction).
+        col_of_dim = torch.arange(input_dim, dtype=torch.long) * num_columns // max(input_dim, 1)
+        in_conn = torch.zeros(num_columns, input_dim, dtype=torch.bool)
+        in_conn[col_of_dim, torch.arange(input_dim)] = True
+        self.register_buffer("in_conn", in_conn)
+        in_mask = in_conn.repeat_interleave(neurons_per_column, dim=0)
+
+        self.W_in = TernaryParam((num_columns * neurons_per_column, input_dim), mask=in_mask)
         self.W_rec = TernaryParam(
             (num_columns * neurons_per_column, neurons_per_column), sparsity=0.90
         )
-        self.W_pred = TernaryParam((num_columns * neurons_per_column, input_dim), sparsity=0.85)
+        self.W_pred = TernaryParam((num_columns * neurons_per_column, input_dim), mask=in_mask)
         self.out_basis = TernaryParam(
             (num_columns * neurons_per_column, readout_dim), sparsity=0.90
         )
-
-        # per-column input connectivity: column c connects to input dim j if any of its K rows does
-        conn = _build_sparse_conn((num_columns, input_dim), 0.70, seed)
-        self.register_buffer("in_conn", conn)
-        self._conn_version = int(self.W_in.version.item()) - 1
-        self._refresh_conn()
 
         # fixed-point state
         self.register_buffer("v", torch.zeros((num_columns, neurons_per_column), dtype=torch.int16))
@@ -78,17 +75,8 @@ class ColumnLayer(nn.Module):
         self.total_active_cols = 0
         self.register_buffer("fires_acc", torch.zeros(()))
         self.register_buffer("_arange_k", torch.arange(neurons_per_column))
-        self._conn_dirty = False
 
     # ------------------------------------------------------------------
-    def _refresh_conn(self) -> None:
-        if int(self.W_in.version.item()) == self._conn_version:
-            return
-        latent = self.W_in.latent
-        nz = (latent.view(self.c, self.k, self.input_dim) != 0).any(dim=1)
-        self.in_conn = nz
-        self._conn_version = int(self.W_in.version.item())
-
     def _rows_for(self, col_idx: torch.Tensor) -> torch.Tensor:
         base = col_idx * self.k
         return base[:, None] + self._arange_k
@@ -105,9 +93,6 @@ class ColumnLayer(nn.Module):
         and instrumentation.
         """
         x = x.detach().float()
-        if self._conn_dirty:
-            self._refresh_conn()
-            self._conn_dirty = False
         active_inputs = x != 0
         col_active = (self.in_conn & active_inputs).any(dim=1)
         idx = col_active.nonzero(as_tuple=False).flatten()
@@ -150,6 +135,7 @@ class ColumnLayer(nn.Module):
         self.theta[idx] = theta_new
         self.trace[idx] = trace_new
         self.prev_fire[idx] = fire.float()
+        self.rate[idx] = self.rate[idx] * 0.99 + fire.float() * 0.01
         self.fires_acc += fire.sum()
 
         # ---- predictive coding: predict the NEXT tick input from this state ----

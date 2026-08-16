@@ -35,7 +35,7 @@ def apply_synaptic_scaling(
     w = layer.W_in.latent
     scaled = w * factors.view(-1, 1)
     layer.W_in.latent = scaled
+    layer.W_in._clamp_mask()
     layer.W_in.version += 1
     layer.W_in._cache = None
-    layer._conn_dirty = True
     return float(factors.mean().item())
