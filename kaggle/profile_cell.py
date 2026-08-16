@@ -73,20 +73,31 @@ dt = time.monotonic() - t0
 print(f"\n    profiled {4 * SEG} tokens in {dt:.2f}s -> {4 * SEG / dt:.1f} tok/s\n")
 
 total = prof.key_averages().total_average()
-print(f"    self CUDA time total: {total.self_cuda_time_total:.1f} ms  (of ~{dt * 1000:.0f} ms wall)")
-print(f"    CPU time total       : {total.self_cpu_time_total:.1f} ms\n")
+
+
+def _field(e, *names, default=0.0):
+    for n in names:
+        if hasattr(e, n):
+            return getattr(e, n)
+    return default
+
+
+cu = _field(total, "self_cuda_time_total", "self_device_time_total", "cuda_time_total", "device_time_total")
+cpu = _field(total, "self_cpu_time_total", "self_cpu_time_total", "cpu_time_total")
+print(f"    self CUDA time total: {cu:.1f} ms  (of ~{dt * 1000:.0f} ms wall)")
+print(f"    CPU time total       : {cpu:.1f} ms\n")
+
+
+def _table(prof, *sort_keys, row_limit=18):
+    for k in sort_keys:
+        try:
+            return prof.key_averages().table(sort_by=k, row_limit=row_limit)
+        except Exception:
+            continue
+    return "(no sort key available for this torch version)"
+
 
 print("=== TOP CUDA-TIME OPS ===")
-print(
-    prof.key_averages().table(
-        sort_by="cuda_time_total", row_limit=16,
-        columns=["count", "self_cuda_time_total", "cuda_time_total", "name"],
-    )
-)
+print(_table(prof, "self_cuda_time_total", "cuda_time_total", "self_device_time_total"))
 print("=== TOP CPU-TIME OPS ===")
-print(
-    prof.key_averages().table(
-        sort_by="self_cpu_time_total", row_limit=16,
-        columns=["count", "self_cpu_time_total", "cpu_time_total", "name"],
-    )
-)
+print(_table(prof, "self_cpu_time_total", "cpu_time_total"))
