@@ -56,38 +56,26 @@ class ReadoutHead(nn.Module):
         n_neg: int = 4,
         mod: float = 1.0,
     ) -> list[list[int]]:
-        """Contrastive local update for a whole window (many tokens per GPU op).
+        """Online softmax-gradient update for the whole window (many tokens per GPU op).
 
-        Returns the negative samples per token. Semantics match `learn` (positive push toward the
-        observed token + negative pull away from sampled counterfactuals, normalized per row) but
-        the whole window is applied with scatter-adds instead of a per-token Python loop.
+        Per token: g = softmax(W·ctx) − onehot(y), then W -= lr·(g ⊗ ctx). This is the exact
+        gradient of the head's cross-entropy, computed locally (ctx is a fixed input; no gradient
+        flows back into the cortex). Positive and negative signal are balanced per token, so the
+        head cannot collapse the way the old sampled-contrastive rule did when pulls outran pushes.
         """
         ctx = self.normalize_batch(ctx).to(torch.float16)
         ys = torch.tensor(y_pos, dtype=torch.long, device=ctx.device)
-        w = ctx.shape[0]
-
-        # positive phase
+        W32 = self.W.float()
+        logits = ctx.float() @ W32.t()  # (W, vocab)
+        p = torch.softmax(logits, dim=-1)
+        onehot = torch.zeros_like(p)
+        onehot.scatter_(1, ys[:, None], 1.0)
         lr = self.lcfg.lr_readout * mod / (1.0 + self.count[ys].sqrt())  # (W,)
-        ys_idx = ys[:, None].expand(w, self.dim_in)
-        self.W.scatter_add_(0, ys_idx, (ctx.float() * lr[:, None]).to(torch.float16))
-        self.W[ys] = (self.W[ys] / (self.W[ys].norm(dim=1, keepdim=True) + 1e-8)).to(
-            torch.float16
-        )
+        grad = (p - onehot) * lr[:, None]
+        grad = grad.t() @ ctx.float()  # (vocab, dim)
+        self.W -= grad.to(torch.float16)
         self.count[ys] += 1
-
-        # negative phase (counterfactual pull-away, sampled per token)
-        negs = torch.randint(0, self.vocab_size - 1, (w, n_neg), device=ctx.device)
-        negs = torch.where(negs >= ys[:, None], negs + 1, negs)  # avoid the positive class
-        neg_ids = negs.reshape(-1)
-        neg_ctx = ctx.repeat_interleave(n_neg, dim=0) * (self.lcfg.lr_readout * mod)
-        self.W.scatter_add_(
-            0, neg_ids[:, None].expand(-1, self.dim_in), (-neg_ctx).to(torch.float16)
-        )
-        uniq = neg_ids.unique()
-        self.W[uniq] = (self.W[uniq] / (self.W[uniq].norm(dim=1, keepdim=True) + 1e-8)).to(
-            torch.float16
-        )
-        return negs.tolist()
+        return []
 
     # ------------------------------------------------------------------
     def positive_phase(self, ctx: torch.Tensor, y_pos: int, mod: float = 1.0) -> None:
@@ -99,7 +87,7 @@ class ReadoutHead(nn.Module):
 
     def negative_phase(self, ctx: torch.Tensor, y_neg: int, mod: float = 1.0) -> None:
         ctx = self.normalize(ctx).to(torch.float16)
-        lr = self.lcfg.lr_readout * mod
+        lr = self.lcfg.lr_readout * mod / (1.0 + self.count[y_neg].sqrt().item())
         self.W[y_neg] -= lr * ctx
         self.W[y_neg] /= self.W[y_neg].norm() + 1e-8
 
