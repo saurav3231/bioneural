@@ -47,6 +47,9 @@ class StandardTransformer(nn.Module):
         self.ln_f = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, vocab_size)
 
+    def _dev(self) -> torch.device:
+        return next(self.parameters()).device
+
     # ------------------------------------------------------------------
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, s = x.shape
@@ -63,13 +66,15 @@ class StandardTransformer(nn.Module):
         """Train for `seconds` wall-clock on a flat token stream. Returns steps taken."""
         self.train()
         opt = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=0.01)
-        tokens_t = torch.tensor(tokens, dtype=torch.long)
+        tokens_t = torch.tensor(tokens, dtype=torch.long, device=self._dev())
         n = tokens_t.numel()
         t0 = time.monotonic()
         steps = 0
         losses: list[float] = []
         while time.monotonic() - t0 < seconds:
-            starts = torch.randint(0, max(n - seq, 1), (batch,))
+            starts = torch.randint(
+                0, max(n - seq, 1), (batch,), device=self._dev()
+            )
             x = torch.stack([tokens_t[s : s + seq] for s in starts])
             y = torch.stack([tokens_t[s + 1 : s + seq + 1] for s in starts])
             logits = self.forward(x)
@@ -91,7 +96,7 @@ class StandardTransformer(nn.Module):
     @torch.no_grad()
     def evaluate(self, tokens: list[int], seq: int = 128, max_batches: int = 50) -> dict:
         self.eval()
-        tokens_t = torch.tensor(tokens, dtype=torch.long)
+        tokens_t = torch.tensor(tokens, dtype=torch.long, device=self._dev())
         n = tokens_t.numel()
         starts = torch.arange(0, max(n - seq, 1), seq)
         starts = starts[:max_batches]
@@ -126,7 +131,7 @@ class StandardTransformer(nn.Module):
         ids = list(prompt_ids)
         for _ in range(n_tokens):
             ctx = ids[-max_len:]
-            x = torch.tensor([ctx])
+            x = torch.tensor([ctx], device=self._dev())
             logits = self.forward(x)[0, -1] / max(temperature, 0.05)
             tok = int(torch.multinomial(torch.softmax(logits, -1), 1).item())
             ids.append(tok)

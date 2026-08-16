@@ -198,7 +198,11 @@ def column_batched_forward(
     """
     idx = active.nonzero(as_tuple=False).flatten()
     if idx.numel() == 0:
-        return torch.zeros(x_full.shape[0], w_full.shape[0], dtype=x_full.dtype)
-    out_full = torch.zeros(x_full.shape[0], w_full.shape[0], dtype=x_full.dtype)
+        return torch.zeros(
+            x_full.shape[0], w_full.shape[0], dtype=x_full.dtype, device=x_full.device
+        )
+    out_full = torch.zeros(
+        x_full.shape[0], w_full.shape[0], dtype=x_full.dtype, device=x_full.device
+    )
     out_full[:, idx] = ternary_matmul(x_full, w_full[idx], config)
     return out_full

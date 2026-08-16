@@ -274,17 +274,17 @@ def run_benchmark(
         n_head=4,
         max_len=512,
         seed=cfg.seed,
-    )
+    ).to(org.device)
     std_params = std_model.n_params()
     std_curves = {"loss": [], "acc": [], "steps": []}
     opt = torch.optim.AdamW(std_model.parameters(), lr=3e-4, weight_decay=0.01)
     t0 = time.monotonic()
     meter.start()
     batch, seq = 8, 128
-    tokens_t = torch.tensor(flat_train, dtype=torch.long)
+    tokens_t = torch.tensor(flat_train, dtype=torch.long, device=org.device)
     total_steps = 0
     while time.monotonic() - t0 < budget:
-        starts = torch.randint(0, max(tokens_t.numel() - seq, 1), (batch,))
+        starts = torch.randint(0, max(tokens_t.numel() - seq, 1), (batch,), device=org.device)
         x = torch.stack([tokens_t[s : s + seq] for s in starts])
         y = torch.stack([tokens_t[s + 1 : s + seq + 1] for s in starts])
         logits = std_model.forward(x)

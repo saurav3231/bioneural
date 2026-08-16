@@ -77,7 +77,7 @@ class ColumnLayer(nn.Module):
         self.ticks_run = 0
         self.total_active_cols = 0
         self.total_fires = 0
-        self._arange_k = torch.arange(neurons_per_column)
+        self.register_buffer("_arange_k", torch.arange(neurons_per_column))
 
     # ------------------------------------------------------------------
     def _refresh_conn(self) -> None:

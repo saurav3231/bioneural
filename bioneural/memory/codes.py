@@ -23,7 +23,7 @@ def make_sdc(
         k = max(1, int(round(n * active_frac)))
     k = min(k, n)
     topk = torch.topk(vec.abs(), k).indices
-    code = torch.zeros(n, dtype=torch.int8)
+    code = torch.zeros(n, dtype=torch.int8, device=vec.device)
     code[topk] = 1
     if ternary:
         botk = torch.topk(-vec.abs(), k).indices
@@ -45,7 +45,7 @@ def sdc_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
 def pack_bits(code: torch.Tensor) -> bytes:
     """Pack a binary (+1/0) SDC into bytes (for the ~48-64 B/engram episodic store)."""
     code = (code > 0).to(torch.uint8)
-    return np.packbits(code.numpy()).tobytes()
+    return np.packbits(code.cpu().numpy()).tobytes()
 
 
 def unpack_bits(blob: bytes, dim: int) -> torch.Tensor:

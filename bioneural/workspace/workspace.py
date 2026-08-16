@@ -43,7 +43,8 @@ class Workspace:
         if not coalition_codes:
             code = torch.zeros(self.dim, dtype=torch.int8)
         else:
-            acc = torch.zeros(self.dim)
+            dev = coalition_codes[0].device
+            acc = torch.zeros(self.dim, device=dev)
             for c in coalition_codes:
                 acc += c.float()
             code = (acc > 0).to(torch.int8)

@@ -170,7 +170,7 @@ class EpisodicLog:
         links: list | None = None,
         meta: str = "",
     ) -> None:
-        blob = (key > 0).to(torch.uint8).numpy().tobytes()
+        blob = (key > 0).to(torch.uint8).cpu().numpy().tobytes()
         e = Engram(
             time=time.time(),
             key_bytes=blob,
