@@ -18,11 +18,11 @@ env/
 .coverage
 htmlcov/
 
-# --- Data / artifacts ---
-data/
-results/
-checkpoints/
-runs/
+# --- Data / artifacts (root-level only) ---
+/data/
+/results/
+/checkpoints/
+/runs/
 *.pt
 *.ckpt
 *.bin
