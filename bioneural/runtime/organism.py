@@ -324,6 +324,50 @@ class BioNeural(nn.Module):
             "n_tokens": n,
         }
 
+    def evaluate_window(self, token_ids: list[int], window: int = 0) -> dict:
+        """No-learning evaluation using the batched windowed path (fast on GPU).
+
+        Runs the same packet forward the model is trained with, so eval and train share
+        dynamics; used instead of the per-token `evaluate` when `cfg.batch_window >= 2`.
+        """
+        w = max(2, min(window or self.cfg.batch_window, len(token_ids) - 1))
+        if w < 2:
+            return {"acc": 0.0, "nll": float("inf"), "ppl": float("inf"), "n_tokens": 0}
+        xs = token_ids[:-1]
+        ys = token_ids[1:]
+        correct = 0
+        nll = 0.0
+        n = 0
+        gate = self.bus.gate()
+        for i in range(0, len(xs), w):
+            seg = xs[i : i + w]
+            if len(seg) < 1:
+                break
+            xids = torch.tensor(seg, dtype=torch.long, device=self.device)
+            embs = self.emb.weight[xids]
+            bursts = spike_encode_batch(embs, self.cfg.spike_ticks, self.cfg.k_active_per_tick)
+            readout = torch.zeros(len(seg), self.c.readout_dim, device=self.device)
+            for tv in bursts:
+                out = self.columns.forward_batch(tv, gate, learn=False)
+                readout += out["readout"]
+                self.event_bus.advance(1.0)
+            h, _ = self.backbone.window(readout, learn=False, mod=gate)
+            ctx = readout + 0.5 * self.backbone.context_batch(h)
+            logits = self.readout.forward_batch(ctx).float()
+            lsm = torch.log_softmax(logits, dim=-1)
+            y = torch.tensor(ys[i : i + w], dtype=torch.long, device=self.device)[: len(seg)]
+            lsm = lsm[: len(y)]
+            nll += float(-lsm.gather(1, y[:, None]).sum().item())
+            correct += int((logits[: len(y)].argmax(dim=-1) == y).sum().item())
+            n += len(y)
+        nll_mean = nll / max(n, 1)
+        return {
+            "acc": correct / max(n, 1),
+            "nll": nll_mean,
+            "ppl": math.exp(min(nll_mean, 20.0)),
+            "n_tokens": n,
+        }
+
     def generate(self, prompt_ids: list[int], n_tokens: int, temperature: float = 0.8) -> list[int]:
         for p in prompt_ids:
             self.process_token(p, learn=False)

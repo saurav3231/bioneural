@@ -66,7 +66,10 @@ STD_TRAIN_CAP_S = 240.0
 # BioNeural evaluation battery
 # ---------------------------------------------------------------------------
 def _bio_eval_quality(org, val_tokens, gen_len=64, temperature=0.8, ref_sentence=None):
-    ev = org.evaluate(val_tokens[:512])
+    if org.cfg.batch_window >= 2:
+        ev = org.evaluate_window(val_tokens[:512])
+    else:
+        ev = org.evaluate(val_tokens[:512])
     gen = org.generate(val_tokens[:16], gen_len, temperature)
     if ref_sentence is not None:
         ref = ref_sentence[:gen_len]
@@ -242,7 +245,11 @@ def run_benchmark(
         if len(bio_curves["steps"]) < 1 or (org.total_tokens - bio_curves["steps"][-1]) >= max(
             org.cfg.eval.eval_every_steps * seq_len, 1
         ):
-            ev = org.evaluate(val_toks[:256])
+            ev = (
+                org.evaluate_window(val_toks[:256])
+                if cfg.batch_window >= 2
+                else org.evaluate(val_toks[:256])
+            )
             bio_curves["loss"].append(ev["nll"])
             bio_curves["acc"].append(ev["acc"])
             bio_curves["steps"].append(org.total_tokens)
