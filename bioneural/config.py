@@ -27,6 +27,7 @@ class CortexConfig:
     wta_k: int = 8  # k winners within column
     backbone_dim: int = 128
     backbone_layers: int = 1
+    batch_chunk: int = 4  # QEU column dynamics run per sub-block of the window (per-token fidelity)
 
 
 @dataclass

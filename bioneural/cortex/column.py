@@ -222,42 +222,51 @@ class ColumnLayer(nn.Module):
         else:
             pred_err = None
 
-        # ---- local recurrence (packet: contributions summed across the window) ----
-        prev_fire = self.prev_fire[idx]
+        # ---- local recurrence, chunked (packet within sub-blocks, not the whole window) ----
+        # Processing the QEU once per window sums all W tokens into one column state, which makes
+        # per-token readouts differ only by energy weight (weak). Chunking gives consecutive tokens
+        # distinct column dynamics (each chunk's firing feeds the next) while the big einsums above
+        # still run once for the whole window, so the speed win of batching is mostly preserved.
         wrec = self.W_rec.materialized()[rows]
-        contrib_rec = (wrec * prev_fire[:, None, :]).sum(-1)
-        packet = (contrib * cmask[:, :, None]).sum(0) + contrib_rec  # (n_act, K)
-
-        v_new, theta_new, trace_new, _rd, fire, potential = advance_qeu_tensors(
-            self.v[idx].to(torch.int32),
-            self.theta[idx].to(torch.int32),
-            self.trace[idx].to(torch.int32),
-            packet,
-            leak_bits=self.cfg.leak_bits,
-            theta_delta_plus=self.cfg.theta_delta_plus,
-            theta_delta_minus=self.cfg.theta_delta_minus,
-            wta_k=self.cfg.wta_k,
-        )
-        self.v[idx] = v_new
-        self.theta[idx] = theta_new
-        self.trace[idx] = trace_new
-        fire_f = fire.float()
-        self.prev_fire[idx] = fire_f
-        self.rate[idx] = self.rate[idx] * 0.99 + fire_f * 0.01
-        self.fires_acc += fire.sum()
-
-        # prediction for the NEXT tick
         wpred = self.W_pred.materialized()[rows][:, :, adims]
-        pred_here = (wpred * fire_f[:, :, None]).sum(1)  # (n_act, n_a)
-        self.last_pred[idx[:, None], adims[None, :]] = pred_here
-        self.last_fire[idx] = fire_f
-
-        # ---- per-token readout via energy-weighted column shares ----
         ob = self.out_basis.materialized()[rows]  # (n_act, K, rd)
-        col_ro = (ob * fire_f[:, :, None]).sum(1)  # (n_act, rd)
-        share = (contrib.abs().sum(-1) * cmask)  # (W, n_act)
-        share = share / (share.sum(dim=0, keepdim=True) + 1e-8)
-        readout = share @ col_ro  # (W, rd)
+        chunk = max(1, int(getattr(self.cfg, "batch_chunk", 1) or 1))
+        for s in range(0, w, chunk):
+            seg = slice(s, min(s + chunk, w))
+            cmask_s = cmask[seg]
+            contrib_s = contrib[seg]
+            prev_fire = self.prev_fire[idx]
+            contrib_rec = (wrec * prev_fire[:, None, :]).sum(-1)  # (n_act, K)
+            packet = (contrib_s * cmask_s[:, :, None]).sum(0) + contrib_rec  # (n_act, K)
+
+            v_new, theta_new, trace_new, _rd, fire, potential = advance_qeu_tensors(
+                self.v[idx].to(torch.int32),
+                self.theta[idx].to(torch.int32),
+                self.trace[idx].to(torch.int32),
+                packet,
+                leak_bits=self.cfg.leak_bits,
+                theta_delta_plus=self.cfg.theta_delta_plus,
+                theta_delta_minus=self.cfg.theta_delta_minus,
+                wta_k=self.cfg.wta_k,
+            )
+            self.v[idx] = v_new
+            self.theta[idx] = theta_new
+            self.trace[idx] = trace_new
+            fire_f = fire.float()
+            self.prev_fire[idx] = fire_f
+            self.rate[idx] = self.rate[idx] * 0.99 + fire_f * 0.01
+            self.fires_acc += fire.sum()
+
+            # prediction for the NEXT tick
+            pred_here = (wpred * fire_f[:, :, None]).sum(1)  # (n_act, n_a)
+            self.last_pred[idx[:, None], adims[None, :]] = pred_here
+            self.last_fire[idx] = fire_f
+
+            # ---- per-token readout via energy-weighted column shares (within the chunk) ----
+            col_ro = (ob * fire_f[:, :, None]).sum(1)  # (n_act, rd)
+            share = (contrib_s.abs().sum(-1) * cmask_s)  # (L, n_act)
+            share = share / (share.sum(dim=0, keepdim=True) + 1e-8)
+            readout[seg] = share @ col_ro  # (L, rd)
 
         return {
             "readout": readout,
