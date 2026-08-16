@@ -257,9 +257,10 @@ class ColumnLayer(nn.Module):
         # Computed in O(1) ops for the whole window instead of an energy-share proxy (which made
         # all window tokens share one column readout and capped quality).
         ob = self.out_basis.materialized()[rows]  # (n_act, K, rd)
-        drive = torch.einsum("wck,ck->wk", contrib, fire_f)  # (W, K) per-token drive per neuron
-        neuron_ro = torch.einsum("ck,ckr->kr", fire_f, ob)  # (K, rd) fired-neuron readout vectors
-        readout = drive @ neuron_ro  # (W, rd)
+        fire16 = fire_f.to(torch.float16)  # match the fp16 einsum operands
+        drive = torch.einsum("wck,ck->wk", contrib, fire16)  # (W, K) per-token drive per neuron
+        neuron_ro = torch.einsum("ck,ckr->kr", fire16, ob)  # (K, rd) fired-neuron readout vectors
+        readout = (drive @ neuron_ro).float()  # (W, rd)
 
         return {
             "readout": readout,
