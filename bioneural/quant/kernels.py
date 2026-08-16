@@ -107,6 +107,9 @@ def ternary_matmul_triton(
     the columns that received events (column-batched execution).
     """
     cfg = config or QuantConfig()
+    is_vector = x.dim() == 1
+    if is_vector:
+        x = x.unsqueeze(0)
     if not (x.is_cuda and w_latent.is_cuda):
         return None
     try:
@@ -114,6 +117,8 @@ def ternary_matmul_triton(
         import triton.language as tl
     except Exception:
         return None
+    if x.dtype != torch.float16:
+        x = x.to(torch.float16)
 
     w_t, _ = materialize_ternary(
         w_latent, group_size=cfg.group_size, deadzone=cfg.deadzone, scale_mode=cfg.scale_mode
@@ -179,6 +184,8 @@ def ternary_matmul_triton(
         BLOCK_N=16,
         BLOCK_K=32,
     )
+    if is_vector:
+        out = out.squeeze(0)
     return out
 
 
