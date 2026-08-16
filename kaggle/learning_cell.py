@@ -1,10 +1,10 @@
 # =============================================================================
-# BioNeural — LEARNING CURVE (quality at scale, fast batched eval)
+# BioNeural — LEARNING CURVE over WALL-CLOCK (multi-epoch, like the benchmark)
 # =============================================================================
-# The 2400-token sweep showed the batched path learns AS WELL as legacy per token
-# (ppl/legacy ~= 1.0) and runs at ~3.2k tok/s at window 256, but ~1024 ppl is just
-# the BPE-1024 random floor. This cell trains a LOT more tokens (~3 min at 256)
-# and plots ppl/acc dropping below the floor with fast batched evals.
+# The corpus is only ~87k tokens, so a single pass can't move BPE-1024 ppl. The
+# benchmark trains for MINUTES against a wall clock, looping over the corpus over
+# and over (the std transformer gets ~19M token-passes in 15 min). This cell does
+# the same for BioNeural at batch_window=256 (~5k tok/s) and plots ppl/acc vs time.
 # =============================================================================
 # ruff: noqa: E402
 
@@ -16,10 +16,10 @@ import time
 REPO_URL = "https://github.com/saurav3231/bioneural.git"
 REPO_DIR = "/kaggle/working/bioneural"
 
-WINDOW = 256            # best config from the sweep
-TRAIN_TOK = 600_000     # ~3 min at ~3.2k tok/s on a T4
-EVAL_TOK = 512          # fast now (batched eval)
-EVAL_EVERY = 100_000    # report a row every 100k tokens
+WINDOW = 256
+MINUTES = 5              # wall-clock training budget (loop the corpus until this hits)
+EVAL_TOK = 512
+EVAL_EVERY = 250_000     # report a row every 250k token-passes
 
 print("==> GPU check:")
 import torch
@@ -63,38 +63,48 @@ tok = build_tokenizer(train_texts[:200], 1024)
 cfg_vocab = tok.vocab_size if hasattr(tok, "vocab_size") else tok.vocab
 flat_train = [x for t in train_texts for x in tok.encode(t)]
 flat_val = [x for t in val_texts for x in tok.encode(t)][:EVAL_TOK]
+n = len(flat_train)
 print(
-    f"    tokenizer vocab={cfg_vocab} train_tokens={len(flat_train)} "
-    f"val_tokens={len(flat_val)}"
+    f"    tokenizer vocab={cfg_vocab} train_tokens={n} val_tokens={len(flat_val)} "
+    f"(will loop the corpus ~{int(MINUTES * 60 * 5000 / max(n, 1))}x)"
 )
 
-# ---- 4. train + periodic eval ----
+# ---- 4. train against the wall clock, looping over the corpus ----
 cfg = BioNeuralConfig()
 cfg.device = "cuda"
 cfg.vocab_size = cfg_vocab
 cfg.batch_window = WINDOW
 org = BioNeural(cfg)
 
-budget = min(TRAIN_TOK, len(flat_train) - 1)
-last_eval = 0
+budget = MINUTES * 60.0
 t0 = time.monotonic()
+i = 0
+last_eval = 0
 print()
 print("=" * 72)
-print(f"  {'tokens':>9} {'tok/s':>8} {'ppl':>9} {'top1':>6} {'nll':>8} {'notes':>14}")
+print(f"  {'sec':>6} {'tokens':>9} {'tok/s':>7} {'ppl':>9} {'top1':>6} {'nll':>8}")
 print("=" * 72)
-while last_eval < budget:
-    seg = flat_train[last_eval : last_eval + 100_000]
+while time.monotonic() - t0 < budget:
+    seg = flat_train[i : i + 100_000]
     org.train_sequence(seg)
-    done = min(last_eval + len(seg) - 1, budget)
-    _sync()
-    tps = done / max(time.monotonic() - t0, 1e-9)
-    ev = org.evaluate_window(flat_val, window=WINDOW)
-    note = "random floor" if ev["ppl"] > 900 else ("learning!" if ev["ppl"] < 700 else "warming up")
-    print(
-        f"  {done:>9} {tps:>8.0f} {ev['ppl']:>9.2f} {ev['acc']:>6.3f} "
-        f"{ev['nll']:>8.3f} {note:>14}",
-        flush=True,
-    )
-    last_eval = done + 1
+    i = (i + len(seg)) % max(n, 1)
+    if org.total_tokens - last_eval >= EVAL_EVERY:
+        last_eval = org.total_tokens
+        _sync()
+        elapsed = time.monotonic() - t0
+        ev = org.evaluate_window(flat_val, window=WINDOW)
+        print(
+            f"  {elapsed:>6.0f} {org.total_tokens:>9} "
+            f"{org.total_tokens / max(elapsed, 1e-9):>7.0f} "
+            f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f}",
+            flush=True,
+        )
+elapsed = time.monotonic() - t0
+ev = org.evaluate_window(flat_val, window=WINDOW)
+print(
+    f"  {elapsed:>6.0f} {org.total_tokens:>9} {org.total_tokens / max(elapsed, 1e-9):>7.0f} "
+    f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f}",
+    flush=True,
+)
 print("=" * 72)
-print("  ppl 1024 = BPE random floor; the faster it drops, the better the sample efficiency.")
+print("  ppl 1024 = BPE random floor; expect it to fall below ~700 with repeated epochs.")
