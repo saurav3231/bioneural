@@ -84,6 +84,7 @@ class BioNeural(nn.Module):
     # ==================================================================
     # core: one token through the substrate
     # ==================================================================
+    @torch.inference_mode()
     def process_token(self, tok_id: int, learn: bool = True) -> dict:
         emb = self.emb.weight[tok_id]
         vecs = spike_encode(emb, self.cfg.spike_ticks, self.cfg.k_active_per_tick)
@@ -139,6 +140,7 @@ class BioNeural(nn.Module):
     # ==================================================================
     # training
     # ==================================================================
+    @torch.inference_mode()
     def step(self, tok_id: int, next_tok_id: int) -> dict:
         info = self.process_token(tok_id, learn=True)
         ctx, logits = info["ctx"], info["logits"]
@@ -173,6 +175,7 @@ class BioNeural(nn.Module):
 
         return {"correct": correct, "pred": pred, "ne": ne, "reward": reward, "gate": gate}
 
+    @torch.inference_mode()
     def train_sequence(self, token_ids: list[int]) -> dict:
         """Train on a sequence of tokens; returns aggregate metrics over the sequence."""
         if self.cfg.batch_window >= 2:
@@ -191,6 +194,7 @@ class BioNeural(nn.Module):
             "ne_mean": total_ne / max(n, 1),
         }
 
+    @torch.inference_mode()
     def _train_sequence_windowed(self, token_ids: list[int]) -> dict:
         w = self.cfg.batch_window
         correct = 0
@@ -210,6 +214,7 @@ class BioNeural(nn.Module):
             "ne_mean": total_ne / max(n, 1),
         }
 
+    @torch.inference_mode()
     def train_window(self, token_ids: list[int], window: int = 64) -> dict:
         """Batched training: `window` tokens flow through the neural path per GPU op.
 
@@ -302,6 +307,7 @@ class BioNeural(nn.Module):
     # ==================================================================
     # inference / generation
     # ==================================================================
+    @torch.inference_mode()
     def evaluate(self, token_ids: list[int]) -> dict:
         """No-learning evaluation: top-1 acc + per-token NLL (-> perplexity)."""
         correct = 0
@@ -324,6 +330,7 @@ class BioNeural(nn.Module):
             "n_tokens": n,
         }
 
+    @torch.inference_mode()
     def evaluate_window(self, token_ids: list[int], window: int = 0) -> dict:
         """No-learning evaluation using the batched windowed path (fast on GPU).
 
@@ -368,6 +375,7 @@ class BioNeural(nn.Module):
             "n_tokens": n,
         }
 
+    @torch.inference_mode()
     def generate(self, prompt_ids: list[int], n_tokens: int, temperature: float = 0.8) -> list[int]:
         for p in prompt_ids:
             self.process_token(p, learn=False)

@@ -21,6 +21,9 @@ MINUTES = 5              # wall-clock training budget (loop the corpus until thi
 EVAL_TOK = 512
 EVAL_EVERY = 250_000     # report a row every 250k token-passes
 
+# allocator hint from the earlier OOM (must be set before torch imports)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 print("==> GPU check:")
 import torch
 
@@ -81,30 +84,33 @@ t0 = time.monotonic()
 i = 0
 last_eval = 0
 print()
-print("=" * 72)
-print(f"  {'sec':>6} {'tokens':>9} {'tok/s':>7} {'ppl':>9} {'top1':>6} {'nll':>8}")
-print("=" * 72)
+print("=" * 88)
+print(f"  {'sec':>6} {'tokens':>9} {'tok/s':>7} {'ppl':>9} {'top1':>6} {'nll':>8} {'mem_gb':>7}")
+print("=" * 88)
 while time.monotonic() - t0 < budget:
     seg = flat_train[i : i + 100_000]
     org.train_sequence(seg)
     i = (i + len(seg)) % max(n, 1)
+    torch.cuda.empty_cache()
     if org.total_tokens - last_eval >= EVAL_EVERY:
         last_eval = org.total_tokens
         _sync()
         elapsed = time.monotonic() - t0
         ev = org.evaluate_window(flat_val, window=WINDOW)
+        mem = torch.cuda.memory_allocated() / 1e9
         print(
             f"  {elapsed:>6.0f} {org.total_tokens:>9} "
             f"{org.total_tokens / max(elapsed, 1e-9):>7.0f} "
-            f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f}",
+            f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f} {mem:>7.2f}",
             flush=True,
         )
 elapsed = time.monotonic() - t0
 ev = org.evaluate_window(flat_val, window=WINDOW)
+mem = torch.cuda.memory_allocated() / 1e9
 print(
     f"  {elapsed:>6.0f} {org.total_tokens:>9} {org.total_tokens / max(elapsed, 1e-9):>7.0f} "
-    f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f}",
+    f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f} {mem:>7.2f}",
     flush=True,
 )
-print("=" * 72)
-print("  ppl 1024 = BPE random floor; expect it to fall below ~700 with repeated epochs.")
+print("=" * 88)
+print("  ppl 1024 = BPE random floor; mem_gb should stay ~flat after the autograd leak fix.")

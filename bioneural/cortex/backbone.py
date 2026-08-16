@@ -42,7 +42,7 @@ class EventSSM(nn.Module):
         """Update the recurrent state with one event-driven readout vector `r`."""
         f = torch.sigmoid(self.forget)
         r_proj = self.W_in.forward(r)
-        self.h = (1 - f) * self.h + r_proj
+        self.h = ((1 - f) * self.h + r_proj).detach()
         # predict the next readout from current state (for local predictive learning)
         self.pred_ctx = self.W_out.forward(self.h.detach())
         return self.h
@@ -94,8 +94,8 @@ class EventSSM(nn.Module):
             h_prev_cat = torch.cat([h_prev[None, :], h[:-1]], dim=0)  # (W, dim)
             ctx_prev = self.W_out.forward(h_prev_cat)
             err = r - ctx_prev
-            grad = torch.einsum("wd,wi->di", err, h_prev_cat)  # (rd, dim)
-            self.W_out.latent = self.W_out.latent + grad * (self.lcfg.lr_predict * mod)
+            grad = torch.einsum("wd,wi->di", err, h_prev_cat).detach()  # (rd, dim)
+            self.W_out.latent = (self.W_out.latent + grad * (self.lcfg.lr_predict * mod)).detach()
             self.W_out._clamp_mask()
             self.W_out.version += 1
             self.W_out._cache = None

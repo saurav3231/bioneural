@@ -81,7 +81,7 @@ class TernaryParam(nn.Module):
         Returns the number of ternary flips this update caused (a stability diagnostic).
         `count_flips=False` skips the two full-matrix sign passes (hot path).
         """
-        g = grad.to(self.latent.dtype) * lr
+        g = grad.detach().to(self.latent.dtype) * lr
         flips = 0
         if count_flips:
             old = self._ternary_signs()
