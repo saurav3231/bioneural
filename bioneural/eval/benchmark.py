@@ -202,7 +202,7 @@ def run_benchmark(
     # batched training path (many tokens per GPU op) is required on CUDA: the T4's per-op launch
     # latency floor (~1-3 ms/op) makes the legacy one-token-per-cycle path run at single-digit tok/s.
     if cfg.batch_window < 2 and torch.cuda.is_available():
-        cfg.batch_window = 64
+        cfg.batch_window = 256  # best measured config (fastest + best per-token quality)
     budget = cfg.eval.train_budget_minutes * 60.0
 
     # ---- corpus + tokenizer ----
