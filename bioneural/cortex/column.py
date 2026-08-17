@@ -45,6 +45,11 @@ class ColumnLayer(nn.Module):
         in_conn = torch.zeros(num_columns, input_dim, dtype=torch.bool)
         in_conn[col_of_dim, torch.arange(input_dim)] = True
         self.register_buffer("in_conn", in_conn)
+        # owner one-hot (D, C): col_active[w,c] == (x_w has any dim owned by c) == (active @ owner)[w,c] > 0
+        self.register_buffer(
+            "_owner_onehot",
+            torch.nn.functional.one_hot(col_of_dim, num_columns).to(torch.float16),
+        )
         in_mask = in_conn.repeat_interleave(neurons_per_column, dim=0)
 
         self.W_in = TernaryParam((num_columns * neurons_per_column, input_dim), mask=in_mask)
@@ -204,7 +209,8 @@ class ColumnLayer(nn.Module):
             ev[0].record()
         w = x.shape[0]
         active_inputs = x != 0
-        col_active = (self.in_conn[None, :, :] & active_inputs[:, None, :]).any(dim=-1)  # (W, C)
+        # col_active via one tensor-core GEMM (W, D)@(D, C) instead of the (W, C, D) bool broadcast
+        col_active = (active_inputs.to(torch.float16) @ self._owner_onehot) > 0  # (W, C) bool
         idx = col_active.any(dim=0).nonzero(as_tuple=False).flatten()
         n_act = int(idx.numel())
         self.ticks_run += 1
@@ -268,9 +274,9 @@ class ColumnLayer(nn.Module):
         if self.profile:
             ev[4].record()
 
-        # prediction for the NEXT tick
+        # prediction for the NEXT tick (batched matmul: (n_act,1,K)@(n_act,K,n_a) on tensor cores)
         wpred = self.W_pred.materialized()[rows][:, :, adims]
-        pred_here = (wpred * fire_f[:, :, None]).sum(1)  # (n_act, n_a)
+        pred_here = torch.bmm(fire_f[:, None, :].to(torch.float16), wpred).squeeze(1).float()  # (n_act, n_a)
         self.last_pred[idx[:, None], adims[None, :]] = pred_here
         self.last_fire[idx] = fire_f
         if self.profile:
