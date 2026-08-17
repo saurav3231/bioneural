@@ -174,7 +174,11 @@ class ColumnLayer(nn.Module):
         lp = self.last_pred[lidx][:, adims]  # (n_lact, n_a)
         lmask = col_active[:, lidx].float()  # (W, n_lact)
         err = xa[:, None, :] - lp[None, :, :]  # (W, n_lact, n_a)
-        grad = torch.einsum("ak,wai->aki", self.last_fire[lidx], err * lmask[:, :, None])
+        # factor the big w-contraction out of the outer product: grad[a,k,i] = last_fire[a,k]·E[a,i]
+        # with E[a,i] = Σ_w err[w,a,i]·lmask[w,a] — a batched matvec instead of a (W,n_lact,K,n_a)
+        # broadcast (was ~805M fp32 mults/tick; now ~6M).
+        E = torch.bmm(err.permute(1, 2, 0), lmask.t().unsqueeze(2)).squeeze(-1)  # (n_lact, n_a)
+        grad = self.last_fire[lidx].unsqueeze(-1) * E.unsqueeze(1)  # (n_lact, K, n_a)
         lr = self.lcfg.lr_predict * mod * self.lcfg.mod_gate_strength
         self.W_pred.latent[lrows[:, :, None], adims[None, None, :]] += lr * grad
         self.W_pred.latent *= self.W_pred.mask

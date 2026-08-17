@@ -77,17 +77,27 @@ class EventSSM(nn.Module):
         """
         w = r.shape[0]
         r_proj = self.W_in.forward(r)  # (W, dim)
-        a = 1.0 - torch.sigmoid(self.forget)  # (dim,)
-        tidx = torch.arange(w, device=r.device)
-        offs = tidx[:, None] - tidx[None, :]
-        amask = (offs >= 0).float()
-        a_off = (
-            a.reshape(1, 1, -1).pow(offs.clamp(min=0).float()[..., None]) * amask[..., None]
-        )  # (W, W, dim)
-        h_contrib = torch.einsum("wid,id->wd", a_off, r_proj)  # (W, dim)
-        pow_t = a[None, :].pow(tidx.float()[:, None])  # (W, dim)
+        a = (1.0 - torch.sigmoid(self.forget)).clamp(min=0.1)  # (dim,), >=0.1 keeps inverses finite
+        # exact linear-recurrence scan, O(W·dim) instead of the old (W,W,dim) triangular tensor:
+        # h_t = a⊙h_{t-1} + r_proj_t  =>  h_{s+i} = a^i⊙h_{s-1} + a^i⊙Σ_{j<=i} a^{-j}⊙r_{s+j}
+        # chunked (C<=32) so a^{-j} exponents stay finite; done in fp64 so the huge intermediates
+        # (up to ~1e28) don't leak ~1e-7 relative error into the carry (fp32 test showed drift).
+        rp64 = r_proj.double()
+        a64 = a.double()
+        h = torch.empty(w, self.dim, device=r.device)
         h_prev = self.h.detach().clone()
-        h = h_contrib + pow_t * h_prev[None, :]  # (W, dim)
+        carry = h_prev.double()
+        C = 32
+        inv_a = (1.0 / a64).reshape(1, -1)
+        for s in range(0, w, C):
+            e = min(s + C, w)
+            rel = torch.arange(e - s, device=r.device).double().reshape(-1, 1)
+            a_pow = a64.reshape(1, -1).pow(rel)  # (C', dim) a^i
+            scaled = rp64[s:e] * inv_a.pow(rel)  # r_{s+j} ⊙ a^{-j}
+            res = a_pow * (carry.unsqueeze(0) + scaled.cumsum(0))  # (C', dim), fp64
+            h[s:e] = res.float()
+            # next chunk needs a ⊙ h_{s-1} (old closed form is h_t = a^t h_prev + Σ a^{t-i} r_i)
+            carry = (a64 * res[-1]).detach()
 
         surprise = None
         if learn:
