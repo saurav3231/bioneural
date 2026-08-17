@@ -77,6 +77,7 @@ class BioNeural(nn.Module):
         self.total_correct = 0
         self.total_acts = 0
         self.last_act_time = 0.0
+        self._sim_time = 0.0  # organism-relative clock (1 tick ~ 1 s), drives cooldowns/ripples
         self.init_state = time.time()
 
         self.to(self.device)
@@ -135,6 +136,7 @@ class BioNeural(nn.Module):
         self._prev_sdc = sdc.detach()
         self._last_ctx = ctx
         self.total_tokens += 1
+        self._sim_time += 1.0
         return {"ctx": ctx, "logits": logits, "sdc": sdc, "readout": r, "novelty": novelty}
 
     # ==================================================================
@@ -182,7 +184,9 @@ class BioNeural(nn.Module):
     def train_sequence(self, token_ids: list[int]) -> dict:
         """Train on a sequence of tokens; returns aggregate metrics over the sequence."""
         if self.cfg.batch_window >= 2:
-            return self._train_sequence_windowed(token_ids)
+            info = self._train_sequence_windowed(token_ids)
+            self._sim_time += max(len(token_ids) - 1, 0)
+            return info
         correct = 0
         n = 0
         total_ne = 0.0
@@ -420,9 +424,9 @@ class BioNeural(nn.Module):
         drive = self.drives.wants_to_initiate()
         if drive is None:
             return None
-        if time.time() - self.last_act_time < 10:
+        if self._sim_time - self.last_act_time < 10:
             return None
-        self.last_act_time = time.time()
+        self.last_act_time = self._sim_time
         self.drives.log_cause(drive)
         # a self-initiated "message": imagine a continuation from current context
         thought = None
@@ -439,12 +443,22 @@ class BioNeural(nn.Module):
     def idle_update(self, dt_seconds: float) -> None:
         """Async closed-form decay: 4 idle hours cost one update, not 4 hours of ticks."""
         elapsed_ticks = dt_seconds  # 1 tick ~ 1 s in v1
+        self._sim_time += dt_seconds
         async_leak(self.columns, elapsed_ticks, self.c.leak_bits)
         # energy restores during idle
         self.drives.drives["energy"] = min(1.0, self.drives.drives["energy"] + 0.001 * dt_seconds)
         self.drives.update(
             DriveSignals(surprise=self.surprise.value, reward=0.5, novelty=0.1, activity=0.0)
         )
+        # hippocampal replay (sharp-wave ripples): spontaneous reactivation of recent engrams
+        # during rest, ~1 ripple per 2 simulated seconds — the organism is alive when idle.
+        gate = self.bus.gate()
+        n_ripples = int(dt_seconds // 2)
+        engrams = self.fabric.remember_latest(max(n_ripples, 1))
+        for e in engrams:
+            key = e.key.to(self.device).float()
+            self.columns.forward(key, gate)  # reactivation (no learning: cheap, memory-only)
+            self.event_bus.advance(1.0)
         # occasionally let the drive engine initiate
         if self.drives.wants_to_initiate() is not None:
             self.act_autonomously()

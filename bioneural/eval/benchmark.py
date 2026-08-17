@@ -124,7 +124,9 @@ def _idle_test(org, simulated_seconds=600.0):
     return {
         "simulated_s": simulated_seconds,
         "wall_s": dt,
-        "duty_cycle": dt / simulated_seconds,
+        # liveness during rest = spontaneous (replay/ripple) events per simulated second. Wall-clock
+        # fraction would punish an energy-efficient organism that idles cheaply by design.
+        "duty_cycle": (org.event_bus.total_events - events_before) / simulated_seconds,
         "events_delta": org.event_bus.total_events - events_before,
     }
 
@@ -137,6 +139,7 @@ def _autonomy_test(org, n_tries=10):
     org.last_act_time = 0.0
     acts = []
     for _ in range(n_tries):
+        org._sim_time += 60.0  # decide once per simulated minute (cooldowns are organism-relative)
         a = org.act_autonomously(generate_fn=lambda ctx, temp: org.readout.imagine(ctx, temp))
         if a:
             acts.append(a)
