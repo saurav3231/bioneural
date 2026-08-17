@@ -69,16 +69,18 @@ class MemoryFabric:
         ONCE per window, then the per-token stores are cheap Python list appends."""
         keys_c = keys.clone()
         vals_c = values.detach().clone()
-        blob = (keys_c > 0).to(torch.uint8).cpu().numpy().tobytes()  # one host round-trip
+        blob = None
+        if any(v >= 0.3 for v in novelties):
+            blob = (keys_c > 0).to(torch.uint8).cpu().numpy().tobytes()  # one host round-trip
         dim = keys_c.shape[1]
         a_ch = (mod or {}).get("ACh", 0.5)
         da = (mod or {}).get("DA", 0.5)
         for i in range(keys_c.shape[0]):
             self.m1.write(keys_c[i], vals_c[i], aCh=a_ch)
             self.m2a.write_precloned(keys_c[i], vals_c[i], mod=da)
-            if novelties[i] >= 0.3:
+            if novelties[i] >= 0.3 and blob is not None:
                 self.m2b.add_precloned(keys_c[i], blob[i * dim : (i + 1) * dim], meta=meta)
-            self.m1.tick()
+        self.m1.tick()
 
     def recall(self, key: torch.Tensor) -> dict:
         """Return associative priming + affective bias + episodic hits for `key`."""

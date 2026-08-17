@@ -61,14 +61,12 @@ class WorkingMemory:
     def write(self, key: torch.Tensor, payload: torch.Tensor, aCh: float = 0.5) -> None:
         # refresh-protection from ACh
         protected = aCh > 0.7
-        # replace an expired slot first
         if len(self.slots) < self.n_slots:
             self.slots.append(WorkingSlot(key, payload, 0.0, protected, time.time()))
             return
-        # evict oldest unprotected
-        candidates = [i for i, s in enumerate(self.slots) if not s.aCh_protected]
-        idx = min(candidates) if candidates else 0
-        self.slots[idx] = WorkingSlot(key, payload, 0.0, protected, time.time())
+        # evict oldest (FIFO; protection is only a soft hint, age-based tick still drops old slots)
+        self.slots.pop(0)
+        self.slots.append(WorkingSlot(key, payload, 0.0, protected, time.time()))
 
     def tick(self) -> None:
         for s in self.slots:
@@ -111,9 +109,7 @@ class FastWeights:
 
     def write(self, key: torch.Tensor, value: torch.Tensor, mod: float = 1.0) -> None:
         if len(self.keys) >= self.capacity:
-            # evict the weakest (oldest-lowest strength)
-            i = min(range(len(self.strength)), key=lambda j: self.strength[j])
-            del self.keys[i], self.values[i], self.strength[i]
+            del self.keys[0], self.values[0], self.strength[0]  # FIFO eviction (O(1))
         self.keys.append(key.clone())
         self.values.append(value.clone())
         self.strength.append(mod)
@@ -122,8 +118,7 @@ class FastWeights:
     def write_precloned(self, key: torch.Tensor, value: torch.Tensor, mod: float = 1.0) -> None:
         """Same as `write` but the caller already owns fresh clones (batched fast path)."""
         if len(self.keys) >= self.capacity:
-            i = min(range(len(self.strength)), key=lambda j: self.strength[j])
-            del self.keys[i], self.values[i], self.strength[i]
+            del self.keys[0], self.values[0], self.strength[0]  # FIFO eviction (O(1))
         self.keys.append(key)
         self.values.append(value)
         self.strength.append(mod)
