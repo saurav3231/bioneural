@@ -55,6 +55,7 @@ class BioNeural(nn.Module):
             self.lc,
             seed=cfg.seed,
         )
+        self.columns.profile = cfg.profile
         self.backbone = EventSSM(self.c.readout_dim, self.c.backbone_dim, self.c, self.lc)
         self.readout = ReadoutHead(self.c.readout_dim, cfg.vocab_size, self.lc, seed=cfg.seed)
 
