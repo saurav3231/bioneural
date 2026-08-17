@@ -75,6 +75,9 @@ class ColumnLayer(nn.Module):
         self.total_active_cols = 0
         self.register_buffer("fires_acc", torch.zeros(()))
         self.register_buffer("_arange_k", torch.arange(neurons_per_column))
+        self.profile = bool(getattr(cfg, "profile", False))
+        self._pcol: dict[str, float] = {}
+        self._pcol_n = 0
 
     # ------------------------------------------------------------------
     def _rows_for(self, col_idx: torch.Tensor) -> torch.Tensor:
@@ -196,6 +199,9 @@ class ColumnLayer(nn.Module):
         each column's readout contribution is distributed back to tokens by their event energy.
         """
         x = x.detach().float()
+        ev = [torch.cuda.Event(enable_timing=True) for _ in range(7)] if self.profile else None
+        if self.profile:
+            ev[0].record()
         w = x.shape[0]
         active_inputs = x != 0
         col_active = (self.in_conn[None, :, :] & active_inputs[:, None, :]).any(dim=-1)  # (W, C)
@@ -218,17 +224,23 @@ class ColumnLayer(nn.Module):
         adims = active_inputs.any(dim=0).nonzero(as_tuple=False).flatten()
         xa = x[:, adims].to(torch.float16)  # (W, n_a) — fp16 to match the materialized weights
         win = self.W_in.materialized()[rows][:, :, adims]  # (n_act, K, n_a)
+        if self.profile:
+            ev[1].record()
         # one clean fp16 GEMM (tensor cores) instead of a per-token einsum reduction:
         # contrib[w,a,k] = Σ_i win[a,k,i]·x[w,i] == (xa @ win.reshape(n_act*K, n_a).T)[w, a*K+k]
         contrib = (xa @ win.reshape(-1, win.shape[-1]).t()).reshape(
             xa.shape[0], win.shape[0], win.shape[1]
         )  # (W, n_act, K)
         cmask = col_active[:, idx].float()  # (W, n_act)
+        if self.profile:
+            ev[2].record()
 
         if learn:
             pred_err = self._predictive_batch_err(xa, adims, col_active, mod)
         else:
             pred_err = None
+        if self.profile:
+            ev[3].record()
 
         # ---- local recurrence (packet: contributions summed across the window) ----
         prev_fire = self.prev_fire[idx]
@@ -253,12 +265,16 @@ class ColumnLayer(nn.Module):
         self.prev_fire[idx] = fire_f
         self.rate[idx] = self.rate[idx] * 0.99 + fire_f * 0.01
         self.fires_acc += fire.sum()
+        if self.profile:
+            ev[4].record()
 
         # prediction for the NEXT tick
         wpred = self.W_pred.materialized()[rows][:, :, adims]
         pred_here = (wpred * fire_f[:, :, None]).sum(1)  # (n_act, n_a)
         self.last_pred[idx[:, None], adims[None, :]] = pred_here
         self.last_fire[idx] = fire_f
+        if self.profile:
+            ev[5].record()
 
         # ---- per-token readout via energy-weighted column shares ----
         # Each token's drive is summed per column, normalized across the window, and distributed
@@ -269,6 +285,14 @@ class ColumnLayer(nn.Module):
         share = (contrib.float().abs().sum(-1) * cmask)  # (W, n_act)
         share = share / (share.sum(dim=0, keepdim=True) + 1e-8)
         readout = share @ col_ro  # (W, rd)
+
+        if self.profile:
+            ev[6].record()
+            torch.cuda.synchronize()
+            names = ["mask", "gemm", "predictive", "qeu", "wpred", "readout"]
+            for i, nm in enumerate(names):
+                self._pcol[nm] = self._pcol.get(nm, 0.0) + ev[i].elapsed_time(ev[i + 1])
+            self._pcol_n += 1
 
         return {
             "readout": readout,

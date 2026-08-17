@@ -196,6 +196,16 @@ class BioNeural(nn.Module):
                     + "  ".join(f"{k}={pct[k]}" for k in sorted(pct)),
                     flush=True,
                 )
+                if self.columns._pcol_n >= 5:
+                    ct = sum(self.columns._pcol.values())
+                    cp = {k: f"{100.0 * v / max(ct, 1e-9):.0f}%" for k, v in self.columns._pcol.items()}
+                    print(
+                        f"  COL  ms/tick={ct / self.columns._pcol_n:.2f}  "
+                        + "  ".join(f"{k}={cp[k]}" for k in sorted(cp)),
+                        flush=True,
+                    )
+                    self.columns._pcol.clear()
+                    self.columns._pcol_n = 0
                 self._prof.clear()
                 self._prof_n = 0
             return info
