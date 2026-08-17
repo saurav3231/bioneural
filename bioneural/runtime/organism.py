@@ -278,6 +278,9 @@ class BioNeural(nn.Module):
             self.columns.learn_topdown(
                 d_ctx, last_out["share"], last_out["fire"].float(), last_out["idx"], gate
             )
+        # same supervised error into the backbone's readback projection (W_out·h is the other
+        # ctx term): moves W_out and W_in along the task gradient via reciprocal weights.
+        self.backbone.learn_topdown(d_ctx, h, r, gate)
 
         # embedding learning: the token that was PREDICTED moves toward the state that
         # predicted it (emb[x_{t+1}] += lr·(ctx_t − emb[x_{t+1}])). Local Hebbian rule that

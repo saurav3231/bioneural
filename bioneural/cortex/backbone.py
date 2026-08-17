@@ -119,6 +119,30 @@ class EventSSM(nn.Module):
         """Recurrent state window projected back into readout space."""
         return self.W_out.forward(h.detach())
 
+    def learn_topdown(
+        self, d_ctx: torch.Tensor, h: torch.Tensor, r: torch.Tensor, mod: float = 1.0
+    ) -> int:
+        """Three-factor top-down (dopamine-style) error on the readback projection.
+
+        The head's exact gradient w.r.t. ctx tells the backbone how its `W_out·h` term should
+        move (−d_ctx). Applied to W_out directly and to W_in via the projected error
+        (dh = W_outᵀ·d_ctx, dW_in ∝ dh ⊗ r) — the same local pattern as the self-predictive
+        pass, but supervised by the task. No backprop.
+        """
+        w = h.shape[0]
+        err_proj = -d_ctx.detach().float()  # (W, rd): desired Δ(W_out·h)
+        grad_out = torch.einsum("wd,wi->di", err_proj, h.detach().float()) / w  # (rd, dim)
+        self.W_out.latent = (
+            self.W_out.latent + grad_out * (self.lcfg.lr_topdown * mod)
+        ).detach()
+        self.W_out._clamp_mask()
+        self.W_out.version += 1
+        self.W_out._cache = None
+        dh = err_proj @ self.W_out.materialized().float()  # (W, dim)
+        grad_in = (dh.t() @ r.detach().float()) / w  # (dim, rd)
+        self.W_in.update_latent(grad_in, lr=self.lcfg.lr_topdown * mod, count_flips=False)
+        return 0
+
     def reset(self) -> None:
         self.h.zero_()
         self.pred_ctx = None
