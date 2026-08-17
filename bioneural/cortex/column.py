@@ -252,15 +252,15 @@ class ColumnLayer(nn.Module):
         self.last_pred[idx[:, None], adims[None, :]] = pred_here
         self.last_fire[idx] = fire_f
 
-        # ---- per-token readout via drive-weighted neurons (batched, matches the legacy rule) ----
-        # The legacy per-token readout is r_t = Σ_{c,k} contrib_{t,c,k}·fire_{c,k}·out_basis_{c,k}.
-        # Computed in O(1) ops for the whole window instead of an energy-share proxy (which made
-        # all window tokens share one column readout and capped quality).
+        # ---- per-token readout via energy-weighted column shares ----
+        # Each token's drive is summed per column, normalized across the window, and distributed
+        # through that column's fired readout vector. This empirically beats the raw per-neuron
+        # drive readout (which over-weights weak column activations).
         ob = self.out_basis.materialized()[rows]  # (n_act, K, rd)
-        fire16 = fire_f.to(torch.float16)  # match the fp16 einsum operands
-        drive = torch.einsum("wck,ck->wk", contrib, fire16)  # (W, K) per-token drive per neuron
-        neuron_ro = torch.einsum("ck,ckr->kr", fire16, ob)  # (K, rd) fired-neuron readout vectors
-        readout = (drive @ neuron_ro).float()  # (W, rd)
+        col_ro = (ob.float() * fire_f[:, :, None]).sum(1)  # (n_act, rd)
+        share = (contrib.float().abs().sum(-1) * cmask)  # (W, n_act)
+        share = share / (share.sum(dim=0, keepdim=True) + 1e-8)
+        readout = share @ col_ro  # (W, rd)
 
         return {
             "readout": readout,
