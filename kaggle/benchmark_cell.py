@@ -96,7 +96,7 @@ print(f"  I/J (acc·ppl^-1):BioNeural={h['ij_bio']:.4f}  Standard={h['ij_std']:.
 print("=" * 64)
 b = report["bioneural"]
 m = b["memory"]
-print(f"  BioNeural extras:")
+print("  BioNeural extras:")
 print(f"    One-shot retention @8/@16/@32 steps: {m['scores'].get('8', m['scores'].get(8, 0)):.3f} / "
       f"{m['scores'].get('16', m['scores'].get(16, 0)):.3f} / {m['scores'].get('32', m['scores'].get(32, 0)):.3f}  "
       f"(random-control baseline {m.get('control', 0):.3f})")
