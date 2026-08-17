@@ -334,7 +334,7 @@ class ColumnLayer(nn.Module):
         if idx.numel() == 0:
             return 0
         rows = self._rows_for(idx)
-        err_col = (share.detach().float() * d_ctx.detach().float().unsqueeze(1)).sum(0)  # (n_act, rd)
+        err_col = (share.detach().float().unsqueeze(-1) * d_ctx.detach().float().unsqueeze(1)).sum(0)  # (n_act, rd)
         grad = -torch.einsum("ck,cr->ckr", fire_f.float(), err_col)  # (n_act, K, rd)
         grad_full = torch.zeros_like(self.out_basis.latent)
         grad_full[rows] = grad
