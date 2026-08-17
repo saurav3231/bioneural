@@ -113,7 +113,7 @@ class BioNeural(nn.Module):
         self.backbone.forward(r)
 
         # context for the readout head: local readout + recurrent projection
-        ctx = r + 0.5 * self.backbone.context()
+        ctx = r + 0.5 * self.backbone.context() + self.cfg.ctx_embed_weight * emb
         logits = self.readout.forward(ctx)
 
         # workspace + memory
@@ -254,7 +254,10 @@ class BioNeural(nn.Module):
         h, bsurp = self.backbone.window(r, learn=True, mod=gate)
         if bsurp is not None:
             self.surprise.update(float(bsurp.item()))
-        ctx = r + 0.5 * self.backbone.context_batch(h)
+        # context for the head: processed (cortex+SSM) + direct sensory (current token embedding).
+        # Higher cortical areas receive both bottom-up input and integrated state — and the
+        # learned embedding is the single most predictive feature for the next token.
+        ctx = r + 0.5 * self.backbone.context_batch(h) + self.cfg.ctx_embed_weight * self.emb.weight[xids]
 
         # readout head: batched forward + contrastive learn
         logits = self.readout.forward_batch(ctx).float()
@@ -374,7 +377,7 @@ class BioNeural(nn.Module):
                 readout += out["readout"]
                 self.event_bus.advance(1.0)
             h, _ = self.backbone.window(readout, learn=False, mod=gate)
-            ctx = readout + 0.5 * self.backbone.context_batch(h)
+            ctx = readout + 0.5 * self.backbone.context_batch(h) + self.cfg.ctx_embed_weight * embs
             logits = self.readout.forward_batch(ctx).float()
             lsm = torch.log_softmax(logits, dim=-1)
             y = torch.tensor(ys[i : i + w], dtype=torch.long, device=self.device)[: len(seg)]
