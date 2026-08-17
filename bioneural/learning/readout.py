@@ -1,12 +1,20 @@
-"""Readout heads trained by a local contrastive / forward-forward rule (no backprop).
+"""Readout heads trained by local (backprop-free) rules over the cortex state.
 
-A linear head over the cortex's sparse distributed state. It learns in two phases:
+A two-layer perceptron head (ctx -> hidden -> vocab) with exact local gradients computed
+manually at each layer. All weights are continuous (fp32/fp16) — unlike the ternary cortex,
+continuous surfaces can take supervised error gradients without discrete-flip noise, so this
+is where the task supervises the model. The hidden layer's gradient w.r.t. ctx (`d_ctx`) is
+returned so the embedding can use it as a three-factor (dopamine-style) top-down signal.
 
-* **Positive phase** (real outcome): push the correct token's prototype toward the current state.
-* **Negative phase** (counterfactual, sampled or imagined): pull sampled wrong tokens away.
+Forward (batched):
+    ctx = l2_normalize(ctx)
+    a1  = tanh(W1 · ctx)
+    logits = W2 · a1
 
-Updates are normalized per-class (McNaughton-style diminishing updates) for stability. This is
-the closest cheap local approximation to a softmax head's gradient.
+Local gradients (exact for this MLP, no autograd graph):
+    g2 = softmax(logits) - onehot(y);      W2 -= lr · g2 ⊗ a1
+    g1 = (g2 · W2) ⊙ (1 - a1²);            W1 -= lr · g1 ⊗ ctx
+    d_ctx = g1 · W1                        (three-factor signal for the embedding)
 """
 
 from __future__ import annotations
@@ -23,77 +31,77 @@ class ReadoutHead(nn.Module):
         self.dim_in = dim_in
         self.vocab_size = vocab_size
         self.lcfg = lcfg
+        hidden = lcfg.head_hidden
         g = torch.Generator().manual_seed(seed)
         self.register_buffer(
-            "W", (torch.randn(vocab_size, dim_in, generator=g) * 0.02).to(torch.float16)
+            "W1", (torch.randn(hidden, dim_in, generator=g) * 0.02).to(torch.float16)
+        )
+        self.register_buffer(
+            "W2", (torch.randn(vocab_size, hidden, generator=g) * 0.02).to(torch.float16)
         )
         self.register_buffer("count", torch.zeros(vocab_size))
         self._rng = g
 
     # ------------------------------------------------------------------
-    def normalize(self, ctx: torch.Tensor) -> torch.Tensor:
-        n = ctx.norm() + 1e-8
-        return ctx / n
+    def _forward(self, ctx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """ctx (W, dim) -> (a1 (W, hidden), logits (W, vocab))."""
+        ctx = ctx / (ctx.norm(dim=-1, keepdim=True) + 1e-8)
+        a1 = torch.tanh((ctx.to(torch.float16) @ self.W1.t()).float())  # (W, hidden)
+        logits = a1.to(torch.float16) @ self.W2.t()  # (W, vocab)
+        return a1, logits
 
     def forward(self, ctx: torch.Tensor) -> torch.Tensor:
-        """Logits over vocab for a (normalized) context vector."""
-        ctx = self.normalize(ctx)
-        return ctx.to(torch.float16) @ self.W.T  # (vocab,)
-
-    # ------------------------------------------------------------------
-    def normalize_batch(self, ctx: torch.Tensor) -> torch.Tensor:
-        return ctx / (ctx.norm(dim=1, keepdim=True) + 1e-8)
+        """Logits over vocab for a context vector."""
+        _, logits = self._forward(ctx)
+        return logits.squeeze(0)
 
     def forward_batch(self, ctx: torch.Tensor) -> torch.Tensor:
         """Logits for a (W, dim) batch of contexts -> (W, vocab)."""
-        ctx = self.normalize_batch(ctx)
-        return ctx.to(torch.float16) @ self.W.T
+        _, logits = self._forward(ctx)
+        return logits
 
+    # ------------------------------------------------------------------
     def learn_batch(
         self,
         ctx: torch.Tensor,
         y_pos: list[int],
         n_neg: int = 4,
         mod: float = 1.0,
-    ) -> list[list[int]]:
-        """Online softmax-gradient update for the whole window (many tokens per GPU op).
+    ) -> torch.Tensor:
+        """Exact local gradients for the 2-layer head over a whole window.
 
-        Per token: g = softmax(W·ctx) − onehot(y), then W -= lr·(g ⊗ ctx). This is the exact
-        gradient of the head's cross-entropy, computed locally (ctx is a fixed input; no gradient
-        flows back into the cortex). Positive and negative signal are balanced per token, so the
-        head cannot collapse the way the old sampled-contrastive rule did when pulls outran pushes.
+        Returns `d_ctx = g1 · W1` — the gradient of the head's loss w.r.t. the (normalized)
+        context, used by the embedding as a three-factor top-down signal.
         """
-        ctx = self.normalize_batch(ctx).to(torch.float16)
+        a1, logits = self._forward(ctx)
         ys = torch.tensor(y_pos, dtype=torch.long, device=ctx.device)
-        W32 = self.W.float()
-        logits = ctx.float() @ W32.t()  # (W, vocab)
-        p = torch.softmax(logits, dim=-1)
+        p = torch.softmax(logits.float(), dim=-1)
         onehot = torch.zeros_like(p)
         onehot.scatter_(1, ys[:, None], 1.0)
-        lr = self.lcfg.lr_readout * mod / (1.0 + self.count[ys].sqrt())  # (W,)
-        grad = (p - onehot) * lr[:, None]
-        grad = grad.t() @ ctx.float()  # (vocab, dim)
-        self.W -= grad.to(torch.float16)
+        lr2 = self.lcfg.lr_readout * mod / (1.0 + self.count[ys].sqrt())  # (W,)
+        lr1 = self.lcfg.lr_hidden * mod / (1.0 + self.count[ys].sqrt())
+        g2 = p - onehot  # (W, vocab) unscaled error
+        self.W2 -= ((g2 * lr2[:, None]).t() @ a1).to(torch.float16)  # (vocab, hidden)
+        g1 = (g2 @ self.W2.float()) * (1.0 - a1**2)  # (W, hidden)
+        ctxn = ctx / (ctx.norm(dim=-1, keepdim=True) + 1e-8)
+        self.W1 -= ((g1 * lr1[:, None]).t() @ ctxn.float()).to(torch.float16)  # (hidden, dim)
         self.count[ys] += 1
-        # top-down error in context space (reciprocal projection through the head's own weights).
-        # This is the exact gradient of the head's loss w.r.t. the (normalized) context, which the
-        # cortex/embedding can use as a supervised, dopamine-style neuromodulatory signal.
-        d_ctx = (p - onehot) @ W32  # (W, dim)
+        d_ctx = (g1 * lr1[:, None]) @ self.W1.float()  # (W, dim)
         return d_ctx
 
     # ------------------------------------------------------------------
     def positive_phase(self, ctx: torch.Tensor, y_pos: int, mod: float = 1.0) -> None:
-        ctx = self.normalize(ctx).to(torch.float16)
+        a1, _ = self._forward(ctx)
         lr = self.lcfg.lr_readout * mod / (1.0 + self.count[y_pos].sqrt().item())
-        self.W[y_pos] += lr * ctx
-        self.W[y_pos] /= self.W[y_pos].norm() + 1e-8
+        self.W2[y_pos] += (lr * a1).to(torch.float16)
+        self.W2[y_pos] /= self.W2[y_pos].norm() + 1e-8
         self.count[y_pos] += 1
 
     def negative_phase(self, ctx: torch.Tensor, y_neg: int, mod: float = 1.0) -> None:
-        ctx = self.normalize(ctx).to(torch.float16)
+        a1, _ = self._forward(ctx)
         lr = self.lcfg.lr_readout * mod / (1.0 + self.count[y_neg].sqrt().item())
-        self.W[y_neg] -= lr * ctx
-        self.W[y_neg] /= self.W[y_neg].norm() + 1e-8
+        self.W2[y_neg] -= (lr * a1).to(torch.float16)
+        self.W2[y_neg] /= self.W2[y_neg].norm() + 1e-8
 
     def learn(
         self,
@@ -103,7 +111,7 @@ class ReadoutHead(nn.Module):
         mod: float = 1.0,
         negatives: list[int] | None = None,
     ) -> list[int]:
-        """Contrastive local update. Returns the negative samples used."""
+        """Contrastive local update (legacy one-token path). Returns the negatives used."""
         self.positive_phase(ctx, y_pos, mod)
         if negatives is None:
             negatives = torch.randint(
@@ -123,6 +131,7 @@ class ReadoutHead(nn.Module):
 
     def stats(self) -> dict[str, float]:
         return {
-            "prototype_norm_mean": float(self.W.norm(dim=1).mean().item()),
+            "prototype_norm_mean": float(self.W2.norm(dim=1).mean().item()),
+            "hidden_norm_mean": float(self.W1.norm(dim=1).mean().item()),
             "rows_touched": float((self.count > 0).sum().item()) / self.vocab_size,
         }

@@ -37,6 +37,8 @@ class LearningConfig:
     lr_readout: float = 0.1
     lr_emb_top: float = 0.1  # top-down (dopamine-style) error lr applied to input embeddings
     lr_topdown: float = 0.05  # top-down error lr applied to the cortex readout projections
+    lr_hidden: float = 0.05  # hidden-layer lr of the (2-layer) readout head
+    head_hidden: int = 256  # hidden width of the readout head
     trace_decay: float = 0.95
     mod_gate_strength: float = 1.0
     shadow_update: float = 0.05
