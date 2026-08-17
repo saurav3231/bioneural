@@ -214,7 +214,11 @@ class ColumnLayer(nn.Module):
         adims = active_inputs.any(dim=0).nonzero(as_tuple=False).flatten()
         xa = x[:, adims].to(torch.float16)  # (W, n_a) — fp16 to match the materialized weights
         win = self.W_in.materialized()[rows][:, :, adims]  # (n_act, K, n_a)
-        contrib = torch.einsum("aki,wi->wak", win, xa)  # (W, n_act, K)
+        # one clean fp16 GEMM (tensor cores) instead of a per-token einsum reduction:
+        # contrib[w,a,k] = Σ_i win[a,k,i]·x[w,i] == (xa @ win.reshape(n_act*K, n_a).T)[w, a*K+k]
+        contrib = (xa @ win.reshape(-1, win.shape[-1]).t()).reshape(
+            xa.shape[0], win.shape[0], win.shape[1]
+        )  # (W, n_act, K)
         cmask = col_active[:, idx].float()  # (W, n_act)
 
         if learn:
