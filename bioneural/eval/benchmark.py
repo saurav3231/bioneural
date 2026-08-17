@@ -234,7 +234,7 @@ def run_benchmark(
     t0 = time.monotonic()
     meter.start()
     i = 0
-    seq_len = 64
+    seq_len = max(cfg.batch_window * 4, 1024)  # multi-window segments keep per-call overhead low
     n = len(flat_train) - seq_len
     ev = {"ppl": float("nan"), "acc": float("nan")}
     last_report = 0.0
