@@ -132,6 +132,7 @@ class EventSSM(nn.Module):
         w = h.shape[0]
         err_proj = -d_ctx.detach().float()  # (W, rd): desired Δ(W_out·h)
         grad_out = torch.einsum("wd,wi->di", err_proj, h.detach().float()) / w  # (rd, dim)
+        grad_out = grad_out / (grad_out.norm() + 1e-8)  # bounded latent update
         self.W_out.latent = (
             self.W_out.latent + grad_out * (self.lcfg.lr_topdown * mod)
         ).detach()
@@ -140,6 +141,7 @@ class EventSSM(nn.Module):
         self.W_out._cache = None
         dh = err_proj @ self.W_out.materialized().float()  # (W, dim)
         grad_in = (dh.t() @ r.detach().float()) / w  # (dim, rd)
+        grad_in = grad_in / (grad_in.norm() + 1e-8)  # bounded latent update
         self.W_in.update_latent(grad_in, lr=self.lcfg.lr_topdown * mod, count_flips=False)
         return 0
 

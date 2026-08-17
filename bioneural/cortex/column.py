@@ -335,7 +335,9 @@ class ColumnLayer(nn.Module):
             return 0
         rows = self._rows_for(idx)
         err_col = (share.detach().float().unsqueeze(-1) * d_ctx.detach().float().unsqueeze(1)).sum(0)  # (n_act, rd)
+        err_col = err_col / (err_col.norm(dim=-1, keepdim=True) + 1e-8)  # per-column unit direction
         grad = -torch.einsum("ck,cr->ckr", fire_f.float(), err_col)  # (n_act, K, rd)
+        grad = grad / (grad.norm() + 1e-8)  # bounded latent update
         grad_full = torch.zeros_like(self.out_basis.latent)
         grad_full[rows] = grad
         lr = self.lcfg.lr_topdown * mod * self.lcfg.mod_gate_strength

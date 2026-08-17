@@ -274,13 +274,16 @@ class BioNeural(nn.Module):
         # top-down (dopamine-style) error into the cortex readout projections: each active column
         # gets its share of the head's error attributed by its energy share and applied to out_basis
         # (Δout ∝ −fire ⊗ err_col). The reservoir's emitted features are now task-supervised too.
+        # The error is used as a unit direction (magnitude lives in the learning rate) so latent
+        # shadows can't be chaotically overwritten as the head's prototypes grow.
+        td_dir = d_ctx / (d_ctx.norm(dim=-1, keepdim=True) + 1e-8)
         if last_out is not None and last_out["n_active"] > 0:
             self.columns.learn_topdown(
-                d_ctx, last_out["share"], last_out["fire"].float(), last_out["idx"], gate
+                td_dir, last_out["share"], last_out["fire"].float(), last_out["idx"], gate
             )
         # same supervised error into the backbone's readback projection (W_out·h is the other
         # ctx term): moves W_out and W_in along the task gradient via reciprocal weights.
-        self.backbone.learn_topdown(d_ctx, h, r, gate)
+        self.backbone.learn_topdown(td_dir, h, r, gate)
 
         # embedding learning: the token that was PREDICTED moves toward the state that
         # predicted it (emb[x_{t+1}] += lr·(ctx_t − emb[x_{t+1}])). Local Hebbian rule that
