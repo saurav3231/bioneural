@@ -16,7 +16,8 @@ import time
 REPO_URL = "https://github.com/saurav3231/bioneural.git"
 REPO_DIR = "/kaggle/working/bioneural"
 
-WINDOW = 256
+WINDOW = 384  # best measured config: >10k tok/s with spike_ticks=2
+TICKS = 2
 MINUTES = 5              # wall-clock training budget (loop the corpus until this hits)
 EVAL_TOK = 512
 EVAL_EVERY = 250_000     # report a row every 250k token-passes
@@ -77,6 +78,7 @@ cfg = BioNeuralConfig()
 cfg.device = "cuda"
 cfg.vocab_size = cfg_vocab
 cfg.batch_window = WINDOW
+cfg.spike_ticks = TICKS
 org = BioNeural(cfg)
 
 budget = MINUTES * 60.0

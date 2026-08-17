@@ -99,7 +99,7 @@ class EvalConfig:
 class BioNeuralConfig:
     vocab_size: int = 1024
     token_dim: int = 256
-    spike_ticks: int = 3  # token -> burst over N ticks
+    spike_ticks: int = 2  # token -> burst over N ticks (2 = fastest stable; 3 = richer)
     k_active_per_tick: int = 8
     batch_size: int = 8
     log_every: int = 20
