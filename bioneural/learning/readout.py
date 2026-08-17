@@ -75,7 +75,11 @@ class ReadoutHead(nn.Module):
         grad = grad.t() @ ctx.float()  # (vocab, dim)
         self.W -= grad.to(torch.float16)
         self.count[ys] += 1
-        return []
+        # top-down error in context space (reciprocal projection through the head's own weights).
+        # This is the exact gradient of the head's loss w.r.t. the (normalized) context, which the
+        # cortex/embedding can use as a supervised, dopamine-style neuromodulatory signal.
+        d_ctx = (p - onehot) @ W32  # (W, dim)
+        return d_ctx
 
     # ------------------------------------------------------------------
     def positive_phase(self, ctx: torch.Tensor, y_pos: int, mod: float = 1.0) -> None:

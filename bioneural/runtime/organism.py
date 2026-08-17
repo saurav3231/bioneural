@@ -263,7 +263,7 @@ class BioNeural(nn.Module):
         logits = self.readout.forward_batch(ctx).float()
         preds = logits.argmax(dim=-1).tolist()  # one sync per window
         correct = sum(1 for p, y in zip(preds, ys, strict=False) if p == y)
-        self.readout.learn_batch(ctx, ys, mod=gate)
+        d_ctx = self.readout.learn_batch(ctx, ys, mod=gate)
 
         # embedding learning: the token that was PREDICTED moves toward the state that
         # predicted it (emb[x_{t+1}] += lr·(ctx_t − emb[x_{t+1}])). Local Hebbian rule that
@@ -272,7 +272,12 @@ class BioNeural(nn.Module):
         ys_t = torch.tensor(ys, dtype=torch.long, device=self.device)
         delta = ctx.detach().float() - self.emb.weight[ys_t]
         self.emb.weight.index_add_(0, ys_t, (delta * (0.04 * gate)).to(self.emb.weight.dtype))
-        touched = torch.unique(ys_t)
+        # top-down (dopamine-style) supervised error through the head's reciprocal weights:
+        # emb[x_t] -= lr·d_ctx — the exact gradient the readout would like to push onto the
+        # input embedding, delivered locally via reciprocal connections (three-factor rule).
+        td = (-self.lc.lr_emb_top * gate * d_ctx).to(self.emb.weight.dtype)
+        self.emb.weight.index_add_(0, xids, td)
+        touched = torch.unique(torch.cat([ys_t, xids]))
         self.emb.weight[touched] = (
             self.emb.weight[touched] / (self.emb.weight[touched].norm(dim=1, keepdim=True) + 1e-8)
         ).to(self.emb.weight.dtype)

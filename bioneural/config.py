@@ -35,6 +35,7 @@ class LearningConfig:
     lr_predict: float = 0.05
     lr_hebb: float = 0.02
     lr_readout: float = 0.1
+    lr_emb_top: float = 0.1  # top-down (dopamine-style) error lr applied to input embeddings
     trace_decay: float = 0.95
     mod_gate_strength: float = 1.0
     shadow_update: float = 0.05
