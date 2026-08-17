@@ -95,12 +95,16 @@ print(f"  Tokens/s:       BioNeural={h['tokps_bio']:.1f}  Standard={h['tokps_std
 print(f"  I/J (acc·ppl^-1):BioNeural={h['ij_bio']:.4f}  Standard={h['ij_std']:.4f}")
 print("=" * 64)
 b = report["bioneural"]
-print(
-    f"  BioNeural extras: active_cols/tick={b['col_stats']['active_cols_frac']:.3f}, "
-    f"retention@32={b['memory']['scores'].get('32', b['memory']['scores'].get(32, 0)):.3f}, "
-    f"idle_duty={b['liveness']['idle']['duty_cycle']:.5f}, "
-    f"acts={b['liveness']['autonomy']['n_acts']}"
-)
+m = b["memory"]
+print(f"  BioNeural extras:")
+print(f"    One-shot retention @8/@16/@32 steps: {m['scores'].get('8', m['scores'].get(8, 0)):.3f} / "
+      f"{m['scores'].get('16', m['scores'].get(16, 0)):.3f} / {m['scores'].get('32', m['scores'].get(32, 0)):.3f}  "
+      f"(random-control baseline {m.get('control', 0):.3f})")
+print(f"    Retrieval latency: {m.get('retrieval_latency_ms', 0):.2f} ms   engrims: {m.get('engrams', 0)}")
+print(f"    Energy: {b['energy'].get('watts_avg', 0):.1f} W avg, {b.get('joules', 0):.2f} J over {b['energy'].get('train_seconds', 0):.0f}s train  "
+      f"(std: {report['standard']['energy'].get('watts_avg', 0):.1f} W, {report['standard'].get('joules', 0):.2f} J)")
+print(f"    Idle duty cycle: {b['liveness']['idle']['duty_cycle']:.5f}   self-initiated acts: {b['liveness']['autonomy']['n_acts']}")
+print(f"    Active cols / tick: {b['col_stats']['active_cols_frac']:.3f}   fabric: {b['col_stats'].get('fabric', {})}")
 print(f"  Report saved to: {latest}")
 print("  -> report.md  (human readable)")
 print("  -> report.json (machine readable)")
