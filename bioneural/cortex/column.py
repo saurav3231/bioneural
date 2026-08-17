@@ -270,6 +270,8 @@ class ColumnLayer(nn.Module):
             "idx": idx,
             "cmask": cmask,
             "pred_err": pred_err,
+            "share": share,
+            "col_ro": col_ro,
         }
 
     # ------------------------------------------------------------------
@@ -310,6 +312,34 @@ class ColumnLayer(nn.Module):
         grad_full = torch.zeros_like(self.W_rec.latent)
         grad_full[rows] = grad
         flips = self.W_rec.update_latent(grad_full, lr=lr)
+        return flips
+
+    # ------------------------------------------------------------------
+    def learn_topdown(
+        self,
+        d_ctx: torch.Tensor,
+        share: torch.Tensor,
+        fire_f: torch.Tensor,
+        idx: torch.Tensor,
+        mod: float = 1.0,
+    ) -> int:
+        """Three-factor top-down (dopamine-style) error on the readout projection.
+
+        The head's error in context space (d_ctx, the exact gradient of its loss w.r.t. ctx) is
+        attributed to each active column by its energy share in each token, then applied to the
+        readout projection as Δout ∝ −(fire ⊗ err_col). This is how the task supervises the
+        reservoir's output features without backprop: the cortex reshapes what it emits so the
+        readout head can separate tokens better.
+        """
+        if idx.numel() == 0:
+            return 0
+        rows = self._rows_for(idx)
+        err_col = (share.detach().float() * d_ctx.detach().float().unsqueeze(1)).sum(0)  # (n_act, rd)
+        grad = -torch.einsum("ck,cr->ckr", fire_f.float(), err_col)  # (n_act, K, rd)
+        grad_full = torch.zeros_like(self.out_basis.latent)
+        grad_full[rows] = grad
+        lr = self.lcfg.lr_topdown * mod * self.lcfg.mod_gate_strength
+        flips = self.out_basis.update_latent(grad_full, lr=lr, count_flips=False)
         return flips
 
     # ------------------------------------------------------------------
