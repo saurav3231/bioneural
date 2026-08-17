@@ -109,6 +109,7 @@ class BioNeuralConfig:
     device: str = "auto"
     batch_window: int = 0  # >1 enables the batched training path (many tokens per GPU op)
     ctx_embed_weight: float = 1.0  # direct sensory (bottom-up) strength in the readout context
+    profile: bool = False  # per-phase wall-clock breakdown in the windowed training path
 
     quant: QuantConfig = field(default_factory=QuantConfig)
     cortex: CortexConfig = field(default_factory=CortexConfig)

@@ -79,6 +79,8 @@ class BioNeural(nn.Module):
         self.last_act_time = 0.0
         self._sim_time = 0.0  # organism-relative clock (1 tick ~ 1 s), drives cooldowns/ripples
         self.init_state = time.time()
+        self._prof: dict[str, float] = {}  # per-phase ms accumulator (cfg.profile)
+        self._prof_n = 0
 
         self.to(self.device)
 
@@ -186,6 +188,16 @@ class BioNeural(nn.Module):
         if self.cfg.batch_window >= 2:
             info = self._train_sequence_windowed(token_ids)
             self._sim_time += max(len(token_ids) - 1, 0)
+            if self.cfg.profile and self._prof_n >= 5:
+                tot = sum(self._prof.values())
+                pct = {k: f"{100.0 * v / max(tot, 1e-9):.0f}%" for k, v in self._prof.items()}
+                print(
+                    f"  PROF window_ms={tot / self._prof_n:.2f}  "
+                    + "  ".join(f"{k}={pct[k]}" for k in sorted(pct)),
+                    flush=True,
+                )
+                self._prof.clear()
+                self._prof_n = 0
             return info
         correct = 0
         n = 0
@@ -242,12 +254,18 @@ class BioNeural(nn.Module):
 
         readout = torch.zeros(w, self.c.readout_dim, device=self.device)
         pred_errs: list[torch.Tensor] = []
+        prof = self.cfg.profile and torch.cuda.is_available()
+        if prof:
+            ev = [torch.cuda.Event(enable_timing=True) for _ in range(6)]
+            ev[0].record()
         for tv in bursts:
             out = self.columns.forward_batch(tv, gate, learn=True)
             readout += out["readout"]
             if out["pred_err"] is not None:
                 pred_errs.append(out["pred_err"])
             self.event_bus.advance(1.0)
+        if prof:
+            ev[1].record()
 
         if pred_errs:
             ne_col = float(torch.stack(pred_errs).mean().item())  # one sync per window
@@ -258,6 +276,8 @@ class BioNeural(nn.Module):
         h, bsurp = self.backbone.window(r, learn=True, mod=gate)
         if bsurp is not None:
             self.surprise.update(float(bsurp.item()))
+        if prof:
+            ev[2].record()
         # context for the head: processed (cortex+SSM) + direct sensory (current token embedding).
         # Higher cortical areas receive both bottom-up input and integrated state — and the
         # learned embedding is the single most predictive feature for the next token.
@@ -268,6 +288,8 @@ class BioNeural(nn.Module):
         preds = logits.argmax(dim=-1).tolist()  # one sync per window
         correct = sum(1 for p, y in zip(preds, ys, strict=False) if p == y)
         d_ctx = self.readout.learn_batch(ctx, ys, mod=gate)
+        if prof:
+            ev[3].record()
 
         # top-down task error is applied ONLY to continuous weight surfaces (embeddings, readout
         # head) — ternary-quantized cortex/backbone weights update by discrete flips, so continuous
@@ -306,6 +328,8 @@ class BioNeural(nn.Module):
         else:
             keys = sdcs
         self.fabric.write_experience_batch(keys, sdcs, novelties, self.bus.broadcast())
+        if prof:
+            ev[4].record()
 
         # neuromodulators / drives / stats
         ne = float(min(1.0, self.surprise.value))
@@ -333,6 +357,14 @@ class BioNeural(nn.Module):
         if self._steps_since_homeo >= 50:
             apply_synaptic_scaling(self.columns, self.c.target_rate)
             self._steps_since_homeo = 0
+
+        if prof:
+            ev[5].record()
+            torch.cuda.synchronize()
+            names = ["columns", "backbone", "head+embed", "sdc/mem", "rest"]
+            for i, nm in enumerate(names):
+                self._prof[nm] = self._prof.get(nm, 0.0) + ev[i].elapsed_time(ev[i + 1])
+            self._prof_n += 1
 
         return {"acc": correct / max(w, 1), "n": w, "ne_mean": ne}
 

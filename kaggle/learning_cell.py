@@ -21,6 +21,7 @@ TICKS = 2
 MINUTES = 15             # wall-clock training budget (loop the corpus until this hits)
 EVAL_TOK = 512
 EVAL_EVERY = 250_000     # report a row every 250k token-passes
+PROFILE = True           # per-phase window breakdown (columns/backbone/head/sdc-mem/rest)
 
 # allocator hint from the earlier OOM (must be set before torch imports)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -79,6 +80,7 @@ cfg.device = "cuda"
 cfg.vocab_size = cfg_vocab
 cfg.batch_window = WINDOW
 cfg.spike_ticks = TICKS
+cfg.profile = PROFILE
 org = BioNeural(cfg)
 
 budget = MINUTES * 60.0
