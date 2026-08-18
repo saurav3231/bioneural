@@ -4,7 +4,7 @@
 # Trains at batch_window=384 for MINUTES minutes, then prints:
 #   * the best ppl/top1 seen (the ~103 peak, not the overfit 15-min number)
 #   * full ctx  : ppl / acc        (what the model actually reports)
-#   * emb only  : ppl / acc        (embedding anchor alone)
+#   * emb only  : ppl / acc        (embedding anchor alone — the bigram floor)
 #   * cortex    : ppl / acc        (backbone/cortex alone)  [EMBSSM=False]
 #   * ssm       : ppl / acc        (EmbSSM alone)           [EMBSSM=True]
 # Decision rule:
@@ -39,6 +39,7 @@ print(
     f"    torch={torch.__version__} cuda={torch.cuda.is_available()} "
     f"gpu={torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}"
 )
+torch.manual_seed(0)
 
 
 def _sync() -> None:
@@ -103,7 +104,8 @@ while time.monotonic() - t0 < budget:
             best = dict(ppl=ev["ppl"], acc=ev["acc"], t=time.monotonic() - t0)
         print(
             f"    {time.monotonic() - t0:>5.0f}s {org.total_tokens:>9} tok "
-            f"ppl {ev['ppl']:>7.2f} top1 {ev['acc']:.3f}",
+            f"ppl {ev['ppl']:>7.2f} top1 {ev['acc']:.3f}  "
+            f"emb {ev['ppl_emb']:>6.2f} ssm {ev['ppl_ssm']:>6.2f}",
             flush=True,
         )
 
