@@ -77,11 +77,14 @@ class MemoryFabric:
         a_ch = (mod or {}).get("ACh", 0.5)
         da = (mod or {}).get("DA", 0.5)
         now = time.time()
-        for i in range(keys_c.shape[0]):
-            self.m1.write(keys_c[i], vals_c[i], aCh=a_ch, now=now)
-            self.m2a.write_precloned(keys_c[i], vals_c[i], mod=da)
+        w = keys_c.shape[0]
+        m1_start = max(0, w - self.m1.n_slots)  # M1 is a FIFO; only the window tail survives it
+        for i in range(w):
+            if i >= m1_start:
+                self.m1.write(keys_c[i], vals_c[i], aCh=a_ch, now=now)
             if novelties[i] >= 0.3 and blob is not None:
                 self.m2b.add_precloned(keys_c[i], blob[i * dim : (i + 1) * dim], meta=meta, now=now)
+        self.m2a.write_batch(keys_c, vals_c, mod=da)  # one vectorized ring write for the whole window
         self.m1.tick()
 
     def recall(self, key: torch.Tensor) -> dict:

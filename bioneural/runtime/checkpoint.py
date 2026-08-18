@@ -31,6 +31,8 @@ def save_body(org: BioNeural, path: str | Path) -> Path:
         "fabric_m2a_keys": org.fabric.m2a.keys,
         "fabric_m2a_values": org.fabric.m2a.values,
         "fabric_m2a_strength": org.fabric.m2a.strength,
+        "fabric_m2a_head": org.fabric.m2a._head,
+        "fabric_m2a_len": org.fabric.m2a._len,
         "fabric_m2b_engrams": org.fabric.m2b.engrams,
         "fabric_m3_concepts": org.fabric.m3.concepts,
         "fabric_m3_edges": org.fabric.m3.edges,
@@ -70,6 +72,8 @@ def load_body(org: BioNeural, path: str | Path) -> BioNeural:
     org.fabric.m2a.keys = aux["fabric_m2a_keys"]
     org.fabric.m2a.values = aux["fabric_m2a_values"]
     org.fabric.m2a.strength = aux["fabric_m2a_strength"]
+    org.fabric.m2a._head = aux.get("fabric_m2a_head", 0)
+    org.fabric.m2a._len = aux.get("fabric_m2a_len", 0)
     org.fabric.m2b.engrams = aux["fabric_m2b_engrams"]
     org.fabric.m3.concepts = aux["fabric_m3_concepts"]
     org.fabric.m3.edges = aux["fabric_m3_edges"]

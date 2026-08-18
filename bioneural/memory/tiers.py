@@ -96,54 +96,101 @@ class FastWeights:
     An experience is written by a single key-value store as it happens; recall is
     content-addressable pattern completion, O(active neurons). This is how a fact told
     mid-conversation is *known* three sentences later without any context window.
+
+    Tensor ring buffer (int8 SDCs): FIFO semantics identical to the old list store, but a
+    whole window writes in a few vectorized slice assignments instead of per-token appends.
     """
 
     def __init__(self, capacity: int = 256, dim: int = 256, threshold: float = 0.55):
         self.capacity = capacity
         self.dim = dim
         self.threshold = threshold
-        self.keys: list[torch.Tensor] = []
-        self.values: list[torch.Tensor] = []
-        self.strength: list[float] = []
+        self.keys: torch.Tensor | None = None
+        self.values: torch.Tensor | None = None
+        self.strength: torch.Tensor | None = None
+        self._head = 0  # next write position
+        self._len = 0  # number of stored rows
         self.hits = 0
         self.writes = 0
 
-    def write(self, key: torch.Tensor, value: torch.Tensor, mod: float = 1.0) -> None:
-        if len(self.keys) >= self.capacity:
-            del self.keys[0], self.values[0], self.strength[0]  # FIFO eviction (O(1))
-        self.keys.append(key.clone())
-        self.values.append(value.clone())
-        self.strength.append(mod)
-        self.writes += 1
+    def _ensure(self, key: torch.Tensor, value: torch.Tensor) -> None:
+        if self.keys is None or self.keys.device != key.device:
+            dev = key.device
+            self.keys = torch.zeros(self.capacity, self.dim, dtype=torch.int8, device=dev)
+            self.values = torch.zeros(self.capacity, self.dim, dtype=torch.int8, device=dev)
+            self.strength = torch.zeros(self.capacity, dtype=torch.float32, device=dev)
+            self._head = 0
+            self._len = 0
 
-    def write_precloned(self, key: torch.Tensor, value: torch.Tensor, mod: float = 1.0) -> None:
-        """Same as `write` but the caller already owns fresh clones (batched fast path)."""
-        if len(self.keys) >= self.capacity:
-            del self.keys[0], self.values[0], self.strength[0]  # FIFO eviction (O(1))
-        self.keys.append(key)
-        self.values.append(value)
-        self.strength.append(mod)
-        self.writes += 1
+    def write_batch(
+        self, keys: torch.Tensor, values: torch.Tensor, mod: float = 1.0
+    ) -> None:
+        """Vectorized FIFO write of a `(W, dim)` window (ring buffer, O(1) eviction)."""
+        n = keys.shape[0]
+        if n <= 0:
+            return
+        self._ensure(keys, values)
+        k = keys.to(torch.int8)
+        v = values.to(torch.int8)
+        head = self._head
+        if self._len < self.capacity:
+            space = self.capacity - self._len
+            first = min(n, space)
+            self.keys[head : head + first] = k[:first]
+            self.values[head : head + first] = v[:first]
+            self.strength[head : head + first] = mod
+            head += first
+            self._len += first
+            self.writes += first
+            if first < n:
+                rest = n - first
+                self.keys[:rest] = k[first:]
+                self.values[:rest] = v[first:]
+                self.strength[:rest] = mod
+                head = rest
+                self.writes += rest
+        else:
+            room = self.capacity - head
+            first = min(n, room)
+            self.keys[head : head + first] = k[:first]
+            self.values[head : head + first] = v[:first]
+            self.strength[head : head + first] = mod
+            self.writes += first
+            if first < n:
+                rest = n - first
+                self.keys[:rest] = k[first:]
+                self.values[:rest] = v[first:]
+                self.strength[:rest] = mod
+                head = rest
+                self.writes += rest
+            else:
+                head = (head + first) % self.capacity
+        self._head = head
+
+    def write(self, key: torch.Tensor, value: torch.Tensor, mod: float = 1.0) -> None:
+        self.write_batch(key.unsqueeze(0), value.unsqueeze(0), mod)
 
     def recall(self, key: torch.Tensor) -> torch.Tensor | None:
-        best = -1.0
-        best_val = None
-        for k, v in zip(self.keys, self.values, strict=False):
-            sim = sdc_similarity(key, k)
-            if sim > best:
-                best = sim
-                best_val = v
-        if best >= self.threshold and best_val is not None:
+        if self.keys is None or self._len == 0:
+            return None
+        k = key.detach().to(self.keys.device).to(torch.int16)
+        kb = self.keys.to(torch.int16)  # (capacity, dim)
+        agree = (kb * k[None, :] > 0).sum(dim=1).float()  # zeros in unwritten rows -> 0 sim
+        union = ((kb != 0) | (k[None, :] != 0)).sum(dim=1).float() + 1e-9
+        sims = agree / union
+        best, best_i = sims.max(dim=0)
+        if float(best) >= self.threshold:
             self.hits += 1
-            return best_val
+            return self.values[best_i]
         return None
 
     def forget(self, factor: float = 0.9) -> None:
         # synaptic downscaling during sleep
-        self.strength = [s * factor for s in self.strength]
+        if self.strength is not None:
+            self.strength = self.strength * factor
 
     def occupancy(self) -> float:
-        return len(self.keys) / self.capacity
+        return self._len / self.capacity
 
 
 # ---------------------------------------------------------------------------
