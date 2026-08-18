@@ -132,40 +132,34 @@ class FastWeights:
         self._ensure(keys, values)
         k = keys.to(torch.int8)
         v = values.to(torch.int8)
-        head = self._head % self.capacity  # head can sit at capacity after an exact fill; wrap to 0
-        if self._len < self.capacity:
-            space = self.capacity - self._len
-            first = min(n, space)
-            self.keys[head : head + first] = k[:first]
-            self.values[head : head + first] = v[:first]
-            self.strength[head : head + first] = mod
-            head += first
-            self._len += first
-            self.writes += first
-            if first < n:
-                rest = n - first
-                self.keys[:rest] = k[first:]
-                self.values[:rest] = v[first:]
-                self.strength[:rest] = mod
-                head = rest
-                self.writes += rest
+        self.writes += n
+        if n >= self.capacity:
+            # the batch alone (over)fills the store: keep only its tail (correct FIFO)
+            self.keys.copy_(k[-self.capacity :])
+            self.values.copy_(v[-self.capacity :])
+            self.strength.fill_(mod)
+            self._head = 0
+            self._len = self.capacity
+            return
+        head = self._head % self.capacity
+        space = self.capacity - self._len
+        if n <= space:
+            self.keys[head : head + n] = k
+            self.values[head : head + n] = v
+            self.strength[head : head + n] = mod
+            self._len += n
+            self._head = (head + n) % self.capacity
         else:
-            room = self.capacity - head
-            first = min(n, room)
+            first = space
+            rest = n - space
             self.keys[head : head + first] = k[:first]
             self.values[head : head + first] = v[:first]
             self.strength[head : head + first] = mod
-            self.writes += first
-            if first < n:
-                rest = n - first
-                self.keys[:rest] = k[first:]
-                self.values[:rest] = v[first:]
-                self.strength[:rest] = mod
-                head = rest
-                self.writes += rest
-            else:
-                head = (head + first) % self.capacity
-        self._head = head
+            self.keys[:rest] = k[first:]
+            self.values[:rest] = v[first:]
+            self.strength[:rest] = mod
+            self._len = self.capacity
+            self._head = rest
 
     def write(self, key: torch.Tensor, value: torch.Tensor, mod: float = 1.0) -> None:
         self.write_batch(key.unsqueeze(0), value.unsqueeze(0), mod)
