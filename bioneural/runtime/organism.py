@@ -57,8 +57,11 @@ class BioNeural(nn.Module):
         )
         self.columns.profile = cfg.profile
         self.backbone = EventSSM(self.c.readout_dim, self.c.backbone_dim, self.c, self.lc)
+        # two-stream head: one normalized channel for the embedding anchor, one for the cortex
+        # (r + backbone + task-aligned P·h). Tied mode keeps the legacy merged single stream.
+        head_dim = self.c.readout_dim if self.lc.tied_embeddings else 2 * self.c.readout_dim
         self.readout = ReadoutHead(
-            self.c.readout_dim,
+            head_dim,
             cfg.vocab_size,
             self.lc,
             seed=cfg.seed,
@@ -99,6 +102,21 @@ class BioNeural(nn.Module):
     # ==================================================================
     # core: one token through the substrate
     # ==================================================================
+    def _ctx_for_head(self, emb_ctx: torch.Tensor, cortex_ctx: torch.Tensor) -> torch.Tensor:
+        """Two-stream head input: [norm(emb) | norm(cortex)]. Each channel is normalized
+        SEPARATELY so the embedding anchor keeps its baseline geometry (a linear head on the
+        merged stream diluted it) while the task-aligned cortex channel adds in parallel.
+        Tied mode falls back to the legacy merged single stream."""
+        if self.lc.tied_embeddings:
+            return cortex_ctx + self.cfg.ctx_embed_weight * emb_ctx
+        if emb_ctx.dim() == 1:
+            e = emb_ctx / (emb_ctx.norm() + 1e-8)
+            c = cortex_ctx / (cortex_ctx.norm() + 1e-8)
+            return torch.cat([e, c], dim=0)
+        e = emb_ctx / (emb_ctx.norm(dim=1, keepdim=True) + 1e-8)
+        c = cortex_ctx / (cortex_ctx.norm(dim=1, keepdim=True) + 1e-8)
+        return torch.cat([e, c], dim=1)
+
     @torch.inference_mode()
     def process_token(self, tok_id: int, learn: bool = True) -> dict:
         emb = self.emb.weight[tok_id]
@@ -127,13 +145,14 @@ class BioNeural(nn.Module):
             self.surprise.update(self.backbone.learn(r, gate))
         h = self.backbone.forward(r)
 
-        # context for the readout head: local readout + recurrent projection + task-aligned P·h
+        # context for the readout head: embedding anchor | cortex stream (recurrent + P·h)
         h_p = h / (h.norm() + 1e-8)
-        ctx = (
-            r
-            + 0.5 * self.backbone.context()
-            + self.cfg.ctx_embed_weight * emb
-            + self.cfg.ctx_proj_weight * (self.ctx_proj @ h_p)
+        ctx_hebb = (
+            r + 0.5 * self.backbone.context() + self.cfg.ctx_embed_weight * emb
+        )
+        ctx = self._ctx_for_head(
+            self.cfg.ctx_embed_weight * emb,
+            r + 0.5 * self.backbone.context() + self.cfg.ctx_proj_weight * (self.ctx_proj @ h_p),
         )
         logits = self.readout.forward(ctx)
 
@@ -157,7 +176,7 @@ class BioNeural(nn.Module):
         self._last_ctx = ctx
         self.total_tokens += 1
         self._sim_time += 1.0
-        return {"ctx": ctx, "logits": logits, "sdc": sdc, "readout": r, "novelty": novelty}
+        return {"ctx": ctx, "ctx_hebb": ctx_hebb, "logits": logits, "sdc": sdc, "readout": r, "novelty": novelty}
 
     # ==================================================================
     # training
@@ -170,7 +189,7 @@ class BioNeural(nn.Module):
         correct = pred == next_tok_id
         gate = self.bus.gate()
         self.readout.learn(ctx, int(next_tok_id), mod=gate)
-        delta = ctx.detach().float() - self.emb.weight[next_tok_id]
+        delta = info["ctx_hebb"].detach().float() - self.emb.weight[next_tok_id]
         self.emb.weight[next_tok_id] = self.emb.weight[next_tok_id] + delta * (0.04 * gate)
         self.emb.weight[next_tok_id] /= self.emb.weight[next_tok_id].norm() + 1e-8
 
@@ -311,14 +330,12 @@ class BioNeural(nn.Module):
         # predict the NEXT token's embedding, so ph converges toward emb[y] (~unit norm, bounded).
         h_p = h / (h.norm(dim=1, keepdim=True) + 1e-8)
         ph = self.cfg.ctx_proj_weight * (h_p @ self.ctx_proj.t())
-        # context for the head: processed (cortex+SSM) + direct sensory (current token embedding).
-        # Higher cortical areas receive both bottom-up input and integrated state — and the
-        # learned embedding is the single most predictive feature for the next token.
-        ctx = (
-            r
-            + 0.5 * self.backbone.context_batch(h)
-            + self.cfg.ctx_embed_weight * self.emb.weight[xids]
-            + ph
+        # two-stream context: embedding anchor | cortex (r + backbone + task-aligned P·h).
+        # Each channel is normalized separately, so the head's linear W reads the strong
+        # bigram anchor with its baseline geometry and the cortex adds signal in parallel.
+        ctx = self._ctx_for_head(
+            self.cfg.ctx_embed_weight * self.emb.weight[xids],
+            r + 0.5 * self.backbone.context_batch(h) + ph,
         )
 
         # readout head: batched forward + contrastive learn
@@ -342,16 +359,21 @@ class BioNeural(nn.Module):
         if not self.lc.tied_embeddings:
             # when tied, the head's output-role softmax gradient (which touches every prototype row
             # with exact CE signal) subsumes this local Hebbian pull toward the predicting ctx.
-            # P·h is excluded from the target: emb maps "token -> state", and letting the
-            # predictor pull it would degrade the embedding's own bigram fit.
-            delta = (ctx - ph).detach().float() - self.emb.weight[ys_t]
+            # The target is the pre-P cortex context (exactly the baseline Hebbian), so the
+            # task-aligned predictor can't drag the embedding map off its bigram fit.
+            ctx_hebb = (
+                r
+                + 0.5 * self.backbone.context_batch(h)
+                + self.cfg.ctx_embed_weight * self.emb.weight[xids]
+            )
+            delta = ctx_hebb.detach().float() - self.emb.weight[ys_t]
             self.emb.weight.index_add_(
                 0, ys_t, (delta * (0.04 * gate)).to(self.emb.weight.dtype)
             )
         # top-down (dopamine-style) supervised error through the head's reciprocal weights:
-        # emb[x_t] -= lr·d_ctx. The gradient is computed on the pre-P context (ctx - ph) so the
-        # task-aligned predictor never contaminates the embedding's clean bigram signal.
-        d_ctx = self.readout.grad_ctx(ctx - ph, ys)
+        # emb[x_t] -= lr·d_ctx. The head gradient is split: only the EMBEDDING channel half
+        # (first rd dims) drives the embedding, so the cortex channel can never contaminate it.
+        d_ctx = self.readout.grad_ctx(ctx, ys)[:, : self.c.readout_dim]
         td = (-self.lc.lr_emb_top * gate * d_ctx).to(self.emb.weight.dtype)
         self.emb.weight.index_add_(0, xids, td)
         touched = torch.unique(torch.cat([ys_t, xids]))
@@ -484,18 +506,18 @@ class BioNeural(nn.Module):
             backbone_ctx = self.backbone.context_batch(h)
             h_p = h / (h.norm(dim=1, keepdim=True) + 1e-8)
             ph = self.cfg.ctx_proj_weight * (h_p @ self.ctx_proj.t())
-            ctx = (
-                readout
-                + 0.5 * backbone_ctx
-                + self.cfg.ctx_embed_weight * embs
-                + ph
+            ctx = self._ctx_for_head(
+                self.cfg.ctx_embed_weight * embs,
+                readout + 0.5 * backbone_ctx + ph,
             )
             logits = self.readout.forward_batch(ctx).float()
             # ctx ablation (diagnostic): ppl under the embedding anchor alone vs the
             # cortex/backbone alone. If ppl_emb ~= ppl, the cortex adds nothing for the head.
-            logits_emb = self.readout.forward_batch(self.cfg.ctx_embed_weight * embs).float()
+            logits_emb = self.readout.forward_batch(
+                self._ctx_for_head(self.cfg.ctx_embed_weight * embs, 0.0 * embs)
+            ).float()
             logits_noemb = self.readout.forward_batch(
-                readout + 0.5 * backbone_ctx + ph
+                self._ctx_for_head(0.0 * embs, readout + 0.5 * backbone_ctx + ph)
             ).float()
             lsm = torch.log_softmax(logits, dim=-1)
             lsm_emb = torch.log_softmax(logits_emb, dim=-1)
