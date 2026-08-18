@@ -132,7 +132,7 @@ class FastWeights:
         self._ensure(keys, values)
         k = keys.to(torch.int8)
         v = values.to(torch.int8)
-        head = self._head
+        head = self._head % self.capacity  # head can sit at capacity after an exact fill; wrap to 0
         if self._len < self.capacity:
             space = self.capacity - self._len
             first = min(n, space)
