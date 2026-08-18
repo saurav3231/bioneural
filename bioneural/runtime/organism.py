@@ -130,7 +130,7 @@ class BioNeural(nn.Module):
         # context for the readout head: local readout + recurrent projection + task-aligned P·h
         h_p = h / (h.norm() + 1e-8)
         ctx_hebb = (
-            r + 0.5 * self.backbone.context() + self.cfg.ctx_embed_weight * emb
+            r + self.cfg.ctx_embed_weight * emb
         )
         ctx = (
             r
@@ -302,9 +302,13 @@ class BioNeural(nn.Module):
             ne_col = float(torch.stack(pred_errs).mean().item())  # one sync per window
             self.surprise.update(ne_col)
 
-        # backbone: closed-form linear recurrence over the whole window
+        # backbone: closed-form linear recurrence over the whole window, trained by predictive
+        # coding AGAINST the next token's embedding (task-aligned state formation).
         r = readout
-        h, bsurp = self.backbone.window(r, learn=True, mod=gate)
+        ys_t = torch.tensor(ys, dtype=torch.long, device=self.device)
+        h, bsurp = self.backbone.window(
+            r, learn=True, mod=gate, target=self.emb.weight[ys_t]
+        )
         if bsurp is not None:
             self.surprise.update(float(bsurp.item()))
         if prof:
@@ -332,33 +336,30 @@ class BioNeural(nn.Module):
             ev[3].record()
 
         # top-down task error is applied ONLY to continuous weight surfaces (embeddings, readout
-        # head) — ternary-quantized cortex/backbone weights update by discrete flips, so continuous
-        # error gradients become noise there and collapse learning (observed: ppl -> ~1000 within
-        # ~6 epochs). The cortex learns self-predictively; the embeddings+head carry the task.
+        # head, and the continuous SSM) — ternary-quantized cortex columns update by discrete
+        # flips, so continuous error gradients become noise there and collapse learning. The
+        # columns learn self-predictively; the embeddings+head+SSM carry the task.
 
         # embedding learning: the token that was PREDICTED moves toward the state that
         # predicted it (emb[x_{t+1}] += lr·(ctx_t − emb[x_{t+1}])). Local Hebbian rule that
         # makes input and output embeddings converge to the same "token -> internal state"
         # map (like tied embeddings), so the cortex gets structured, learnable input features.
-        ys_t = torch.tensor(ys, dtype=torch.long, device=self.device)
         if not self.lc.tied_embeddings:
             # when tied, the head's output-role softmax gradient (which touches every prototype row
             # with exact CE signal) subsumes this local Hebbian pull toward the predicting ctx.
-            # The target is the pre-P cortex context (exactly the baseline Hebbian), so the
-            # task-aligned predictor can't drag the embedding map off its bigram fit.
+            # The target EXCLUDES the backbone: the SSM now outputs ~emb[y], so including it
+            # would drag emb[y] toward itself (0.5·emb[y] term) and decay the embedding map.
             ctx_hebb = (
-                r
-                + 0.5 * self.backbone.context_batch(h)
-                + self.cfg.ctx_embed_weight * self.emb.weight[xids]
+                r + self.cfg.ctx_embed_weight * self.emb.weight[xids]
             )
             delta = ctx_hebb.detach().float() - self.emb.weight[ys_t]
             self.emb.weight.index_add_(
                 0, ys_t, (delta * (0.04 * gate)).to(self.emb.weight.dtype)
             )
         # top-down (dopamine-style) supervised error through the head's reciprocal weights:
-        # emb[x_t] -= lr·d_ctx. The gradient is computed on the pre-P context (ctx - ph) so the
-        # task-aligned predictor never contaminates the embedding's clean bigram signal.
-        d_ctx = self.readout.grad_ctx(ctx - ph, ys)
+        # emb[x_t] -= lr·d_ctx. The gradient is computed on the emb-only context (r + emb[x])
+        # so neither the SSM's ~emb[y] output nor P·h can contaminate the embedding map.
+        d_ctx = self.readout.grad_ctx(r + self.cfg.ctx_embed_weight * self.emb.weight[xids], ys)
         td = (-self.lc.lr_emb_top * gate * d_ctx).to(self.emb.weight.dtype)
         self.emb.weight.index_add_(0, xids, td)
         touched = torch.unique(torch.cat([ys_t, xids]))

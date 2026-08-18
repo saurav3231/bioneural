@@ -33,6 +33,7 @@ class CortexConfig:
 class LearningConfig:
     lr_homeo: float = 0.01
     lr_predict: float = 0.05
+    lr_backbone: float = 0.1  # continuous SSM state projections (predictive coding vs next-token emb)
     lr_hebb: float = 0.02
     lr_readout: float = 0.1
     lr_emb_top: float = 0.1  # top-down (dopamine-style) error lr applied to input embeddings
