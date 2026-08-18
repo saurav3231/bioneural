@@ -89,12 +89,16 @@ class EventSSM(nn.Module):
         carry = h_prev.double()
         C = 32  # a^{-C}·r must stay small enough that the O(1) carry isn't lost adding into the cumulative sum
         inv_a = (1.0 / a64).reshape(1, -1)
+        # chunk powers depend only on the offset within a chunk, so precompute the full-C table once
+        rel = torch.arange(C, device=r.device).double().reshape(-1, 1)
+        a_pow_t = a64.reshape(1, -1).pow(rel)  # (C, dim) a^i
+        inv_pow_t = inv_a.pow(rel)  # (C, dim) a^{-i}
         for s in range(0, w, C):
             e = min(s + C, w)
-            rel = torch.arange(e - s, device=r.device).double().reshape(-1, 1)
-            a_pow = a64.reshape(1, -1).pow(rel)  # (C', dim) a^i
-            scaled = rp64[s:e] * inv_a.pow(rel)  # r_{s+j} ⊙ a^{-j}
-            res = a_pow * (carry.unsqueeze(0) + scaled.cumsum(0))  # (C', dim), fp64
+            n = e - s
+            a_pow = a_pow_t[:n]  # (n, dim) a^i
+            scaled = rp64[s:e] * inv_pow_t[:n]  # r_{s+j} ⊙ a^{-j}
+            res = a_pow * (carry.unsqueeze(0) + scaled.cumsum(0))  # (n, dim), fp64
             h[s:e] = res.float()
             # next chunk needs a ⊙ h_{s-1} (old closed form is h_t = a^t h_prev + Σ a^{t-i} r_i)
             carry = (a64 * res[-1]).detach()
