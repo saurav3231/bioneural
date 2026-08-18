@@ -105,7 +105,9 @@ while time.monotonic() - t0 < budget:
         print(
             f"  {elapsed:>6.0f} {org.total_tokens:>9} "
             f"{org.total_tokens / max(elapsed, 1e-9):>7.0f} "
-            f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f} {mem:>7.2f}",
+            f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f} {mem:>7.2f}"
+            f"   | emb {ev['ppl_emb']:.1f}/{ev['acc_emb']:.3f}  "
+            f"ctx {ev['ppl_noemb']:.1f}/{ev['acc_noemb']:.3f}",
             flush=True,
         )
 elapsed = time.monotonic() - t0
@@ -113,8 +115,14 @@ ev = org.evaluate_window(flat_val, window=WINDOW)
 mem = torch.cuda.memory_allocated() / 1e9
 print(
     f"  {elapsed:>6.0f} {org.total_tokens:>9} {org.total_tokens / max(elapsed, 1e-9):>7.0f} "
-    f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f} {mem:>7.2f}",
+    f"{ev['ppl']:>9.2f} {ev['acc']:>6.3f} {ev['nll']:>8.3f} {mem:>7.2f}"
+    f"   | emb {ev['ppl_emb']:.1f}/{ev['acc_emb']:.3f}  "
+    f"ctx {ev['ppl_noemb']:.1f}/{ev['acc_noemb']:.3f}",
     flush=True,
 )
 print("=" * 88)
 print("  ppl 1024 = BPE random floor; mem_gb should stay ~flat after the autograd leak fix.")
+print(
+    "  ctx ablation: 'emb ppl/acc' = embedding anchor alone; 'ctx ppl/acc' = cortex/backbone"
+    " alone (both as eval-only probes of the trained head)."
+)

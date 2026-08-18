@@ -430,6 +430,10 @@ class BioNeural(nn.Module):
         ys = token_ids[1:]
         correct = 0
         nll = 0.0
+        correct_emb = 0
+        nll_emb = 0.0
+        correct_noemb = 0
+        nll_noemb = 0.0
         n = 0
         gate = self.bus.gate()
         for i in range(0, len(xs), w):
@@ -445,19 +449,38 @@ class BioNeural(nn.Module):
                 readout += out["readout"]
                 self.event_bus.advance(1.0)
             h, _ = self.backbone.window(readout, learn=False, mod=gate)
-            ctx = readout + 0.5 * self.backbone.context_batch(h) + self.cfg.ctx_embed_weight * embs
+            backbone_ctx = self.backbone.context_batch(h)
+            ctx = readout + 0.5 * backbone_ctx + self.cfg.ctx_embed_weight * embs
             logits = self.readout.forward_batch(ctx).float()
+            # ctx ablation (diagnostic): ppl under the embedding anchor alone vs the
+            # cortex/backbone alone. If ppl_emb ~= ppl, the cortex adds nothing for the head.
+            logits_emb = self.readout.forward_batch(self.cfg.ctx_embed_weight * embs).float()
+            logits_noemb = self.readout.forward_batch(readout + 0.5 * backbone_ctx).float()
             lsm = torch.log_softmax(logits, dim=-1)
+            lsm_emb = torch.log_softmax(logits_emb, dim=-1)
+            lsm_noemb = torch.log_softmax(logits_noemb, dim=-1)
             y = torch.tensor(ys[i : i + w], dtype=torch.long, device=self.device)[: len(seg)]
             lsm = lsm[: len(y)]
+            lsm_emb = lsm_emb[: len(y)]
+            lsm_noemb = lsm_noemb[: len(y)]
             nll += float(-lsm.gather(1, y[:, None]).sum().item())
+            nll_emb += float(-lsm_emb.gather(1, y[:, None]).sum().item())
+            nll_noemb += float(-lsm_noemb.gather(1, y[:, None]).sum().item())
             correct += int((logits[: len(y)].argmax(dim=-1) == y).sum().item())
+            correct_emb += int((logits_emb[: len(y)].argmax(dim=-1) == y).sum().item())
+            correct_noemb += int((logits_noemb[: len(y)].argmax(dim=-1) == y).sum().item())
             n += len(y)
         nll_mean = nll / max(n, 1)
+        nll_emb_mean = nll_emb / max(n, 1)
+        nll_noemb_mean = nll_noemb / max(n, 1)
         return {
             "acc": correct / max(n, 1),
             "nll": nll_mean,
             "ppl": math.exp(min(nll_mean, 20.0)),
+            "ppl_emb": math.exp(min(nll_emb_mean, 20.0)),
+            "ppl_noemb": math.exp(min(nll_noemb_mean, 20.0)),
+            "acc_emb": correct_emb / max(n, 1),
+            "acc_noemb": correct_noemb / max(n, 1),
             "n_tokens": n,
         }
 
