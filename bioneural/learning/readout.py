@@ -35,7 +35,7 @@ class ReadoutHead(nn.Module):
         self.head_hidden = 0 if self.tied else (lcfg.head_hidden if lcfg else 0)
         if self.tied:
             object.__setattr__(self, "_emb_ref", tied_emb)
-            self.register_buffer("logit_scale", torch.tensor(1.0))
+            self.register_buffer("logit_scale", torch.tensor(0.3))
         else:
             out_dim = self.head_hidden if self.head_hidden > 0 else dim_in
             self.register_buffer(
@@ -119,15 +119,17 @@ class ReadoutHead(nn.Module):
             upd = grad.t() @ ctx.float()  # (vocab, dim)
             self._emb_ref.sub_(upd.to(self._emb_ref.dtype))
             margin = (logits * onehot).sum(-1) - (logits * p).sum(-1)
-            self.logit_scale.add_(
-                (0.1 * self.lcfg.lr_readout * mod) * margin.clamp(-2.0, 2.0).mean()
-            )
-            self.logit_scale.clamp_(0.1, 20.0)
+            m = margin.mean().clamp(0.0, 2.0)
+            self.logit_scale.mul_(1.0 + 0.05 * m)
+            self.logit_scale.clamp_(0.3, 20.0)
             self.count[ys] += 1
-            # input-role top-down in ctx space. Scaled by logit_scale so it co-evolves with
-            # confidence exactly like the linear head's d_ctx grows with its prototype norm.
-            d_ctx = self.logit_scale * (p - onehot) @ emb32  # (W, dim)
-            d_ctx = d_ctx.clamp(-10.0, 10.0)
+                        # input-role top-down: disabled when tied. Applying a ctx-space gradient directly to
+            # emb[x] is self-destructive here because ctx already contains emb[x] (self-referential
+            # feedback, and the p-weighted candidate mass drags every row toward the mean). The
+            # output-role update already trains every row (each token is a target somewhere), so
+            # the shared matrix learns both roles the way tied-embedding LMs do. Keeping the hook
+            # so the return shape stays uniform across head modes.
+            d_ctx = torch.zeros_like(ctx).float()
             return d_ctx
         W32 = self.W.float()
         if self.head_hidden > 0:
