@@ -29,6 +29,7 @@ EVAL_TOK = 512
 EVAL_EVERY = 250_000
 EMBSSM = True     # train the EmbSSM readout path (continuous SSM over embeddings)
 EMBSSM_HIDDEN = 0  # 0 = linear state; >0 = frozen random-feature (ELM) map before the SSM head
+EMBSSM_DECAYS = (0.5, 0.9, 0.99)  # multi-scale state channels (short/mid/long); () = single embssm_decay
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -83,6 +84,7 @@ cfg.spike_ticks = TICKS
 cfg.profile = False
 cfg.embssm_readout = EMBSSM
 cfg.embssm_hidden = EMBSSM_HIDDEN
+cfg.embssm_decays = EMBSSM_DECAYS
 org = BioNeural(cfg)
 
 budget = MINUTES * 60.0

@@ -85,6 +85,7 @@ class BioNeural(nn.Module):
             chunk=cfg.batch_window,
             hidden=cfg.embssm_hidden,
             seed=cfg.seed,
+            decays=tuple(cfg.embssm_decays),
         )
 
         self.bus = NeuromodBus()
@@ -192,7 +193,7 @@ class BioNeural(nn.Module):
         ctx_hebb = ctx
         logits = self.readout.forward(ctx).float() + self.embssm.beta * logits_ssm.float()
 
-        sdc = make_sdc(self.embssm.h.detach(), active_frac=0.05, ternary=True)
+        sdc = make_sdc(self.embssm.sdch(self.embssm.h.detach()), active_frac=0.05, ternary=True)
         novelty = (1.0 - sdc_similarity(sdc, self._prev_sdc)) if self._prev_sdc is not None else 0.5
         self.workspace.compete([sdc], [novelty])
         self.workspace.broadcast([sdc])
@@ -534,7 +535,7 @@ class BioNeural(nn.Module):
         self.embssm.train_beta(-gate * dLdbeta)
         d_ssm = self.embssm.beta * err * gate  # (W, vocab)
         self.embssm.train_head(d_ssm, h_n, mod=1.0)
-        d_ctx = self.embssm.dctx_from_head(d_ssm, h_n)  # (W, dim) gradient on h_n
+        d_ctx = self.embssm.dctx_from_head(d_ssm, h_n)  # list of (W, dim) per channel
         self.embssm.apply_grad_ctx(d_ctx, embs, mod=1.0)
         if prof:
             ev[3].record()
@@ -562,8 +563,9 @@ class BioNeural(nn.Module):
         reward = correct / max(w, 1)
         self.surprise.update(min(1.0, max(0.0, 1.0 - reward)))
 
-        # sparse codes + novelty from the continuous SSM state h
-        sdcs = make_sdc_batch(h_n, active_frac=0.05, ternary=True)
+        # sparse codes + novelty from the continuous SSM state h (single mid-decay channel —
+        # the memory key must stay at the fabric's readout dim)
+        sdcs = make_sdc_batch(self.embssm.sdch(h_n), active_frac=0.05, ternary=True)
         if w > 1:
             sims = sdc_similarity_batch(sdcs[:-1], sdcs[1:])
             novelties = [0.5] + [1.0 - s for s in sims]

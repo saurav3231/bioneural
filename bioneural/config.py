@@ -115,6 +115,7 @@ class BioNeuralConfig:
     ctx_proj_weight: float = 1.0  # task-aligned next-token-embedding predictor (P·h_p) in the readout context
     embssm_readout: bool = False  # predictive path via trained linear-attention over embeddings (EmbSSM)
     embssm_decay: float = 0.9  # EmbSSM state leakage a (h_t = a·h_{t-1} + W_in·emb[x_t])
+    embssm_decays: tuple = ()  # multi-scale state: concatenated channels at these leakages (short/mid/long); empty -> single (embssm_decay,)
     embssm_head_lr: float = 0.05  # CE-trained SSM head (W_vocab) lr over the normalized state
     embssm_hidden: int = 0  # >0: frozen random-feature (ELM) map on the SSM state before the head
     profile: bool = False  # per-phase wall-clock breakdown in the windowed training path
