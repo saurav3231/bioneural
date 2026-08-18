@@ -169,6 +169,35 @@ class ReadoutHead(nn.Module):
         return d_ctx
 
     # ------------------------------------------------------------------
+    def grad_ctx(self, ctx: torch.Tensor, y_pos: list[int]) -> torch.Tensor:
+        """Exact CE gradient of the head w.r.t. ctx, WITHOUT updating any weights.
+
+        Same computation as the tail of `learn_batch` (the (p - onehot) @ W term) but read-only,
+        so the organism can route a clean top-down signal to a *specific* ctx component (e.g. the
+        embedding anchor with the P·h predictor excluded).
+        """
+        ctx = self.normalize_batch(ctx).to(torch.float16)
+        if self.tied:
+            return torch.zeros_like(ctx).float()
+        W32 = self.W.float()
+        ys = torch.tensor(y_pos, dtype=torch.long, device=ctx.device)
+        if self.head_hidden > 0:
+            h = self._features_batch(ctx.float())
+            logits = h @ W32.t()
+            p = torch.softmax(logits, dim=-1)
+            onehot = torch.zeros_like(p)
+            onehot.scatter_(1, ys[:, None], 1.0)
+            dh = (p - onehot) @ W32
+            d_ctx = dh * (h > 0).float() @ self.W_fixed.float()
+            gain = dh.norm(dim=1, keepdim=True) / (d_ctx.norm(dim=1, keepdim=True) + 1e-8)
+            return (d_ctx * gain).clamp(-10.0, 10.0)
+        logits = ctx.float() @ W32.t()
+        p = torch.softmax(logits, dim=-1)
+        onehot = torch.zeros_like(p)
+        onehot.scatter_(1, ys[:, None], 1.0)
+        return (p - onehot) @ W32
+
+    # ------------------------------------------------------------------
     def positive_phase(self, ctx: torch.Tensor, y_pos: int, mod: float = 1.0) -> None:
         protos = self._emb_ref if self.tied else self.W
         ctx = self._features(self.normalize(ctx)).to(torch.float16)

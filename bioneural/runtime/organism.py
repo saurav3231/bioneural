@@ -307,7 +307,8 @@ class BioNeural(nn.Module):
         if prof:
             ev[2].record()
         # task-aligned context projector P: maps the (L2-normalized) recurrent state h_p into
-        # readout space, so P·h_p is bounded and comparable to the unit-norm embedding anchor.
+        # readout space. P is a plain fp32 matrix (no forced row-norm) trained by regression to
+        # predict the NEXT token's embedding, so ph converges toward emb[y] (~unit norm, bounded).
         h_p = h / (h.norm(dim=1, keepdim=True) + 1e-8)
         ph = self.cfg.ctx_proj_weight * (h_p @ self.ctx_proj.t())
         # context for the head: processed (cortex+SSM) + direct sensory (current token embedding).
@@ -324,7 +325,7 @@ class BioNeural(nn.Module):
         logits = self.readout.forward_batch(ctx).float()
         preds = logits.argmax(dim=-1).tolist()  # one sync per window
         correct = sum(1 for p, y in zip(preds, ys, strict=False) if p == y)
-        d_ctx = self.readout.learn_batch(ctx, ys, mod=gate)
+        self.readout.learn_batch(ctx, ys, mod=gate)
         if prof:
             ev[3].record()
 
@@ -341,15 +342,16 @@ class BioNeural(nn.Module):
         if not self.lc.tied_embeddings:
             # when tied, the head's output-role softmax gradient (which touches every prototype row
             # with exact CE signal) subsumes this local Hebbian pull toward the predicting ctx.
-            # P·h is excluded from the target: emb maps "token -> state", and letting the (still
-            # noisy) task-aligned projector pull it would degrade the embedding's own bigram fit.
+            # P·h is excluded from the target: emb maps "token -> state", and letting the
+            # predictor pull it would degrade the embedding's own bigram fit.
             delta = (ctx - ph).detach().float() - self.emb.weight[ys_t]
             self.emb.weight.index_add_(
                 0, ys_t, (delta * (0.04 * gate)).to(self.emb.weight.dtype)
             )
         # top-down (dopamine-style) supervised error through the head's reciprocal weights:
-        # emb[x_t] -= lr·d_ctx — the exact gradient the readout would like to push onto the
-        # input embedding, delivered locally via reciprocal connections (three-factor rule).
+        # emb[x_t] -= lr·d_ctx. The gradient is computed on the pre-P context (ctx - ph) so the
+        # task-aligned predictor never contaminates the embedding's clean bigram signal.
+        d_ctx = self.readout.grad_ctx(ctx - ph, ys)
         td = (-self.lc.lr_emb_top * gate * d_ctx).to(self.emb.weight.dtype)
         self.emb.weight.index_add_(0, xids, td)
         touched = torch.unique(torch.cat([ys_t, xids]))
@@ -357,15 +359,12 @@ class BioNeural(nn.Module):
             self.emb.weight[touched] / (self.emb.weight[touched].norm(dim=1, keepdim=True) + 1e-8)
         ).to(self.emb.weight.dtype)
 
-        # task-aligned context projector update: d_ctx is the head's exact CE gradient w.r.t.
-        # ctx, so the gradient w.r.t. the P·h_p term is d_ctx ⊗ h_p (P is continuous fp32 -> the
-        # error can drive it; the ternary W_out·h path can't). This is the ONLY supervised
-        # signal the recurrent state receives — it turns h into a next-token predictor.
-        gP = (self.cfg.ctx_proj_weight * d_ctx.float()).t() @ h_p.float()  # (rd, dim)
+        # task-aligned context projector update: P is a next-token-embedding predictor, so its
+        # target is emb[y_{t+1}] (the unit-norm token embedding) — dL/dP ∝ (ph − emb[y]) ⊗ h_p.
+        # Regression is stable (no dependence on the head's normalization) and self-bounding.
+        errP = ph.float() - self.emb.weight[ys_t].float()  # (W, rd)
+        gP = (self.cfg.ctx_proj_weight * errP).t() @ h_p.float()  # (rd, dim)
         self.ctx_proj.sub_((self.lc.lr_ctx_proj * gate * gP).to(self.ctx_proj.dtype))
-        self.ctx_proj.data = (
-            self.ctx_proj / (self.ctx_proj.norm(dim=1, keepdim=True) + 1e-8)
-        ).to(self.ctx_proj.dtype)
 
         # sparse codes + novelty (batched)
         sdcs = make_sdc_batch(r, active_frac=0.05, ternary=True)
