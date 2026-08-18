@@ -85,3 +85,21 @@ def test_config_yaml_roundtrip():
     cfg2 = BioNeuralConfig.from_dict(data)
     assert cfg2.cortex.num_columns == cfg.cortex.num_columns
     assert cfg2.eval.dataset == cfg.eval.dataset
+
+
+def test_embssm_windowed_path():
+    cfg = _tiny_cfg()
+    cfg.batch_window = 16
+    cfg.embssm_readout = True
+    tokens = _flat(cfg)
+    org = BioNeural(cfg)
+    org.train_sequence(tokens[:96])
+    tr = org.train_sequence(tokens[:96])
+    assert 0.0 <= tr["acc"] <= 1.0
+    assert tr["n"] == 95
+    ev = org.evaluate_window(tokens[:96])
+    assert 0.0 <= ev["acc"] <= 1.0
+    assert ev["ppl"] > 1.0
+    assert "ppl_ssm" in ev and "ppl_emb" in ev
+    gen = org.generate([tokens[0]] * 4, n_tokens=8)
+    assert len(gen) == 8

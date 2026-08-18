@@ -113,6 +113,8 @@ class BioNeuralConfig:
     batch_window: int = 0  # >1 enables the batched training path (many tokens per GPU op)
     ctx_embed_weight: float = 1.0  # direct sensory (bottom-up) strength in the readout context
     ctx_proj_weight: float = 1.0  # task-aligned next-token-embedding predictor (P·h_p) in the readout context
+    embssm_readout: bool = False  # predictive path via trained linear-attention over embeddings (EmbSSM)
+    embssm_decay: float = 0.9  # EmbSSM state leakage a (h_t = a·h_{t-1} + W_in·emb[x_t])
     profile: bool = False  # per-phase wall-clock breakdown in the windowed training path
 
     quant: QuantConfig = field(default_factory=QuantConfig)

@@ -22,6 +22,7 @@ import torch.nn as nn
 from bioneural.config import BioNeuralConfig
 from bioneural.cortex.backbone import EventSSM
 from bioneural.cortex.column import ColumnLayer
+from bioneural.cortex.embssm import EmbSSM
 from bioneural.cortex.event_bus import EventBus
 from bioneural.cortex.qeu import async_leak
 from bioneural.drives.homeostat import DriveEngine, DriveSignals
@@ -70,6 +71,18 @@ class BioNeural(nn.Module):
         # the readout. Zero-init -> no initial effect on ctx.
         self.ctx_proj = nn.Parameter(torch.zeros(self.c.readout_dim, self.c.backbone_dim))
 
+        # EmbSSM: continuous fp32 linear-attention over token embeddings, trained by exact
+        # closed-form gradients to predict the NEXT token's embedding. Its state h replaces the
+        # ternary columns + self-predictive backbone as the head's long-range context when
+        # `cfg.embssm_readout` is set; it is kept as a nn.Module so `.to(device)` and state_dict
+        # handling are free.
+        self.embssm = EmbSSM(
+            cfg.token_dim,
+            lr=self.lc.lr_backbone,
+            decay=cfg.embssm_decay,
+            chunk=cfg.batch_window,
+        )
+
         self.bus = NeuromodBus()
         self.clock = ClockBank(cfg.time)
         self.event_bus = EventBus(cfg.memory.m0_ring_size)
@@ -101,6 +114,8 @@ class BioNeural(nn.Module):
     # ==================================================================
     @torch.inference_mode()
     def process_token(self, tok_id: int, learn: bool = True) -> dict:
+        if self.cfg.embssm_readout:
+            return self._process_token_embssm(tok_id, learn)
         emb = self.emb.weight[tok_id]
         vecs = spike_encode(emb, self.cfg.spike_ticks, self.cfg.k_active_per_tick)
         gate = self.bus.gate()
@@ -161,6 +176,37 @@ class BioNeural(nn.Module):
         self.total_tokens += 1
         self._sim_time += 1.0
         return {"ctx": ctx, "ctx_hebb": ctx_hebb, "logits": logits, "sdc": sdc, "readout": r, "novelty": novelty}
+
+    @torch.inference_mode()
+    def _process_token_embssm(self, tok_id: int, learn: bool) -> dict:
+        """Single-token EmbSSM path (generation / per-token eval). State comes from the
+        continuous SSM, the head reads ctx_ssm + emb[x], and workspace/memory run on the
+        SSM state h."""
+        emb = self.emb.weight[tok_id]
+        ctx_ssm = self.embssm.forward(emb)
+        ctx = ctx_ssm + self.cfg.ctx_embed_weight * emb
+        ctx_hebb = self.cfg.ctx_embed_weight * emb
+        logits = self.readout.forward(ctx)
+
+        sdc = make_sdc(self.embssm.h.detach(), active_frac=0.05, ternary=True)
+        novelty = (1.0 - sdc_similarity(sdc, self._prev_sdc)) if self._prev_sdc is not None else 0.5
+        self.workspace.compete([sdc], [novelty])
+        self.workspace.broadcast([sdc])
+        self.workspace.elaborate(self.fabric, sdc)
+        if learn and self._prev_sdc is not None:
+            self.fabric.write_experience(
+                self._prev_sdc,
+                sdc,
+                self.bus.broadcast(),
+                meta="tok",
+                episodic=novelty >= 0.3,
+            )
+
+        self._prev_sdc = sdc.detach()
+        self._last_ctx = ctx
+        self.total_tokens += 1
+        self._sim_time += 1.0
+        return {"ctx": ctx, "ctx_hebb": ctx_hebb, "logits": logits, "sdc": sdc, "readout": ctx_ssm, "novelty": novelty}
 
     # ==================================================================
     # training
@@ -276,6 +322,8 @@ class BioNeural(nn.Module):
         w = min(window, len(token_ids) - 1)
         if w < 1:
             return {"acc": 0.0, "n": 0, "ne_mean": 0.0}
+        if self.cfg.embssm_readout:
+            return self._train_window_embssm(token_ids, w)
         xs = token_ids[:w]
         ys = token_ids[1 : w + 1]
         xids = torch.tensor(xs, dtype=torch.long, device=self.device)
@@ -430,6 +478,120 @@ class BioNeural(nn.Module):
 
         return {"acc": correct / max(w, 1), "n": w, "ne_mean": ne}
 
+    @torch.inference_mode()
+    def _train_window_embssm(self, token_ids: list[int], w: int) -> dict:
+        """EmbSSM training path: the head reads ctx = ctx_ssm + emb[x] only.
+
+        The ternary columns and self-predictive backbone are skipped entirely — they cannot
+        carry task signal (measured: cortex-only ~475 ppl ≈ random floor). EmbSSM is a
+        continuous fp32 linear-attention over embeddings trained with exact closed-form
+        gradients to predict the next token's embedding, so its state h is directly
+        task-aligned and far cheaper (no spike loop, no fp64 scan).
+        """
+        xs = token_ids[:w]
+        ys = token_ids[1 : w + 1]
+        xids = torch.tensor(xs, dtype=torch.long, device=self.device)
+        ys_t = torch.tensor(ys, dtype=torch.long, device=self.device)
+        embs = self.emb.weight[xids]  # (W, D)
+        gate = self.bus.gate()
+
+        prof = self.cfg.profile and torch.cuda.is_available()
+        if prof:
+            ev = [torch.cuda.Event(enable_timing=True) for _ in range(6)]
+            ev[0].record()
+
+        ctx_ssm, h = self.embssm.window(embs, self.emb.weight[ys_t], learn=True, mod=gate)
+        if prof:
+            ev[1].record()
+        ctx = ctx_ssm + self.cfg.ctx_embed_weight * embs
+
+        # readout head: batched forward + contrastive learn
+        logits = self.readout.forward_batch(ctx).float()
+        preds = logits.argmax(dim=-1).tolist()  # one sync per window
+        correct = sum(1 for p, y in zip(preds, ys, strict=False) if p == y)
+        self.readout.learn_batch(ctx, ys, mod=gate)
+        if prof:
+            ev[2].record()
+
+        # embedding learning (emb only — the SSM already targets emb[y] directly, so including
+        # ctx_ssm in the Hebbian pull would drag emb[y] toward ~emb[y] and decay the map).
+        ctx_hebb = self.cfg.ctx_embed_weight * self.emb.weight[xids]
+        if not self.lc.tied_embeddings:
+            delta = ctx_hebb.detach().float() - self.emb.weight[ys_t]
+            self.emb.weight.index_add_(
+                0, ys_t, (delta * (0.04 * gate)).to(self.emb.weight.dtype)
+            )
+        # top-down task error through the head's reciprocal weights, on the emb-only context so
+        # the SSM's ~emb[y] output can't contaminate the embedding map.
+        d_ctx = self.readout.grad_ctx(ctx_hebb, ys)
+        td = (-self.lc.lr_emb_top * gate * d_ctx).to(self.emb.weight.dtype)
+        self.emb.weight.index_add_(0, xids, td)
+        touched = torch.unique(torch.cat([ys_t, xids]))
+        self.emb.weight[touched] = (
+            self.emb.weight[touched] / (self.emb.weight[touched].norm(dim=1, keepdim=True) + 1e-8)
+        ).to(self.emb.weight.dtype)
+        if prof:
+            ev[3].record()
+
+        # surprise from the SSM's next-token-embedding prediction error (bounded ~N(0,1) scale)
+        ne_ssm = float((ctx_ssm - self.emb.weight[ys_t]).float().norm(dim=1).mean().item() / math.sqrt(self.cfg.token_dim))
+        self.surprise.update(min(1.0, ne_ssm))
+
+        # sparse codes + novelty from the continuous SSM state h
+        sdcs = make_sdc_batch(h, active_frac=0.05, ternary=True)
+        if w > 1:
+            sims = sdc_similarity_batch(sdcs[:-1], sdcs[1:])
+            novelties = [0.5] + [1.0 - s for s in sims]
+        else:
+            novelties = [0.5]
+
+        # workspace + memory (per-window, batched flush)
+        self.workspace.compete([sdcs[-1]], [novelties[-1]])
+        if self._prev_sdc is not None and w > 1:
+            keys = torch.cat([self._prev_sdc.unsqueeze(0), sdcs[:-1]], dim=0)
+        else:
+            keys = sdcs
+        self.fabric.write_experience_batch(keys, sdcs, novelties, self.bus.broadcast())
+        if prof:
+            ev[4].record()
+
+        # neuromodulators / drives / stats
+        ne = float(min(1.0, self.surprise.value))
+        novelty_mean = sum(novelties) / max(w, 1)
+        reward = correct / max(w, 1)
+        self.bus.from_signals(ne, reward, novelty_mean, stability=max(0.0, 1.0 - ne))
+        self._acc_ema = 0.98 * self._acc_ema + 0.02 * reward
+        self.drives.update(
+            DriveSignals(
+                surprise=ne,
+                reward=reward,
+                novelty=novelty_mean,
+                failure_signature=1.0 - self._acc_ema,
+                activity=1.0,
+            )
+        )
+
+        self._prev_r = h[-1].detach()
+        self._prev_sdc = sdcs[-1].detach()
+        self._last_ctx = ctx[-1]
+        self.total_tokens += w
+        self.total_correct += correct
+
+        self._steps_since_homeo += w
+        if self._steps_since_homeo >= 50:
+            apply_synaptic_scaling(self.columns, self.c.target_rate)
+            self._steps_since_homeo = 0
+
+        if prof:
+            ev[5].record()
+            torch.cuda.synchronize()
+            names = ["embssm", "head+embed", "emb-hebb", "sdc/mem", "rest"]
+            for i, nm in enumerate(names):
+                self._prof[nm] = self._prof.get(nm, 0.0) + ev[i].elapsed_time(ev[i + 1])
+            self._prof_n += 1
+
+        return {"acc": correct / max(w, 1), "n": w, "ne_mean": ne}
+
     # ==================================================================
     # inference / generation
     # ==================================================================
@@ -466,6 +628,8 @@ class BioNeural(nn.Module):
         w = max(2, min(window or self.cfg.batch_window, len(token_ids) - 1))
         if w < 2:
             return {"acc": 0.0, "nll": float("inf"), "ppl": float("inf"), "n_tokens": 0}
+        if self.cfg.embssm_readout:
+            return self._evaluate_window_embssm(token_ids, w)
         xs = token_ids[:-1]
         ys = token_ids[1:]
         correct = 0
@@ -530,6 +694,58 @@ class BioNeural(nn.Module):
             "ppl_noemb": math.exp(min(nll_noemb_mean, 20.0)),
             "acc_emb": correct_emb / max(n, 1),
             "acc_noemb": correct_noemb / max(n, 1),
+            "n_tokens": n,
+        }
+
+    @torch.inference_mode()
+    def _evaluate_window_embssm(self, token_ids: list[int], w: int) -> dict:
+        """No-learning eval on the EmbSSM path. Reports ppl for the combined head, the SSM
+        alone, and the embedding anchor alone (ablation diagnostic)."""
+        xs = token_ids[:-1]
+        ys = token_ids[1:]
+        correct = 0
+        nll = 0.0
+        correct_ssm = 0
+        nll_ssm = 0.0
+        correct_emb = 0
+        nll_emb = 0.0
+        n = 0
+        for i in range(0, len(xs), w):
+            seg = xs[i : i + w]
+            if len(seg) < 1:
+                break
+            xids = torch.tensor(seg, dtype=torch.long, device=self.device)
+            embs = self.emb.weight[xids]
+            ctx_ssm, _ = self.embssm.window(embs, None, learn=False)
+            ctx = ctx_ssm + self.cfg.ctx_embed_weight * embs
+            logits = self.readout.forward_batch(ctx).float()
+            logits_ssm = self.readout.forward_batch(ctx_ssm).float()
+            logits_emb = self.readout.forward_batch(self.cfg.ctx_embed_weight * embs).float()
+            lsm = torch.log_softmax(logits, dim=-1)
+            lsm_ssm = torch.log_softmax(logits_ssm, dim=-1)
+            lsm_emb = torch.log_softmax(logits_emb, dim=-1)
+            y = torch.tensor(ys[i : i + w], dtype=torch.long, device=self.device)[: len(seg)]
+            lsm = lsm[: len(y)]
+            lsm_ssm = lsm_ssm[: len(y)]
+            lsm_emb = lsm_emb[: len(y)]
+            nll += float(-lsm.gather(1, y[:, None]).sum().item())
+            nll_ssm += float(-lsm_ssm.gather(1, y[:, None]).sum().item())
+            nll_emb += float(-lsm_emb.gather(1, y[:, None]).sum().item())
+            correct += int((logits[: len(y)].argmax(dim=-1) == y).sum().item())
+            correct_ssm += int((logits_ssm[: len(y)].argmax(dim=-1) == y).sum().item())
+            correct_emb += int((logits_emb[: len(y)].argmax(dim=-1) == y).sum().item())
+            n += len(y)
+        nll_mean = nll / max(n, 1)
+        nll_ssm_mean = nll_ssm / max(n, 1)
+        nll_emb_mean = nll_emb / max(n, 1)
+        return {
+            "acc": correct / max(n, 1),
+            "nll": nll_mean,
+            "ppl": math.exp(min(nll_mean, 20.0)),
+            "ppl_ssm": math.exp(min(nll_ssm_mean, 20.0)),
+            "ppl_emb": math.exp(min(nll_emb_mean, 20.0)),
+            "acc_ssm": correct_ssm / max(n, 1),
+            "acc_emb": correct_emb / max(n, 1),
             "n_tokens": n,
         }
 
