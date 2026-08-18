@@ -64,6 +64,11 @@ class BioNeural(nn.Module):
             seed=cfg.seed,
             tied_emb=self.emb.weight if self.lc.tied_embeddings else None,
         )
+        # task-aligned context projector: continuous fp32 map from the recurrent state h into
+        # readout space, trained by the head's exact gradient (d_ctx ⊗ h). The ternary W_out·h
+        # channel is self-predictive only; P gives the long-range state a supervised path into
+        # the readout. Zero-init -> no initial effect on ctx.
+        self.ctx_proj = nn.Parameter(torch.zeros(self.c.readout_dim, self.c.backbone_dim))
 
         self.bus = NeuromodBus()
         self.clock = ClockBank(cfg.time)
@@ -120,10 +125,15 @@ class BioNeural(nn.Module):
         # long-range backbone (predictive local learning, one-step lag)
         if learn and self._prev_r is not None:
             self.surprise.update(self.backbone.learn(r, gate))
-        self.backbone.forward(r)
+        h = self.backbone.forward(r)
 
-        # context for the readout head: local readout + recurrent projection
-        ctx = r + 0.5 * self.backbone.context() + self.cfg.ctx_embed_weight * emb
+        # context for the readout head: local readout + recurrent projection + task-aligned P·h
+        ctx = (
+            r
+            + 0.5 * self.backbone.context()
+            + self.cfg.ctx_embed_weight * emb
+            + self.cfg.ctx_proj_weight * (self.ctx_proj @ h)
+        )
         logits = self.readout.forward(ctx)
 
         # workspace + memory
@@ -298,7 +308,12 @@ class BioNeural(nn.Module):
         # context for the head: processed (cortex+SSM) + direct sensory (current token embedding).
         # Higher cortical areas receive both bottom-up input and integrated state — and the
         # learned embedding is the single most predictive feature for the next token.
-        ctx = r + 0.5 * self.backbone.context_batch(h) + self.cfg.ctx_embed_weight * self.emb.weight[xids]
+        ctx = (
+            r
+            + 0.5 * self.backbone.context_batch(h)
+            + self.cfg.ctx_embed_weight * self.emb.weight[xids]
+            + self.cfg.ctx_proj_weight * (h @ self.ctx_proj.t())
+        )
 
         # readout head: batched forward + contrastive learn
         logits = self.readout.forward_batch(ctx).float()
@@ -334,6 +349,16 @@ class BioNeural(nn.Module):
         self.emb.weight[touched] = (
             self.emb.weight[touched] / (self.emb.weight[touched].norm(dim=1, keepdim=True) + 1e-8)
         ).to(self.emb.weight.dtype)
+
+        # task-aligned context projector update: d_ctx is the head's exact CE gradient w.r.t.
+        # ctx, so the gradient w.r.t. the P·h term is d_ctx ⊗ h (P is continuous fp32 -> the
+        # error can drive it; the ternary W_out·h path can't). This is the ONLY supervised
+        # signal the recurrent state receives — it turns h into a next-token predictor.
+        gP = (self.cfg.ctx_proj_weight * d_ctx.float()).t() @ h.float()  # (rd, dim)
+        self.ctx_proj.sub_((self.lc.lr_ctx_proj * gate * gP).to(self.ctx_proj.dtype))
+        self.ctx_proj.data = (
+            self.ctx_proj / (self.ctx_proj.norm(dim=1, keepdim=True) + 1e-8)
+        ).to(self.ctx_proj.dtype)
 
         # sparse codes + novelty (batched)
         sdcs = make_sdc_batch(r, active_frac=0.05, ternary=True)
@@ -450,12 +475,21 @@ class BioNeural(nn.Module):
                 self.event_bus.advance(1.0)
             h, _ = self.backbone.window(readout, learn=False, mod=gate)
             backbone_ctx = self.backbone.context_batch(h)
-            ctx = readout + 0.5 * backbone_ctx + self.cfg.ctx_embed_weight * embs
+            ctx = (
+                readout
+                + 0.5 * backbone_ctx
+                + self.cfg.ctx_embed_weight * embs
+                + self.cfg.ctx_proj_weight * (h @ self.ctx_proj.t())
+            )
             logits = self.readout.forward_batch(ctx).float()
             # ctx ablation (diagnostic): ppl under the embedding anchor alone vs the
             # cortex/backbone alone. If ppl_emb ~= ppl, the cortex adds nothing for the head.
             logits_emb = self.readout.forward_batch(self.cfg.ctx_embed_weight * embs).float()
-            logits_noemb = self.readout.forward_batch(readout + 0.5 * backbone_ctx).float()
+            logits_noemb = self.readout.forward_batch(
+                readout
+                + 0.5 * backbone_ctx
+                + self.cfg.ctx_proj_weight * (h @ self.ctx_proj.t())
+            ).float()
             lsm = torch.log_softmax(logits, dim=-1)
             lsm_emb = torch.log_softmax(logits_emb, dim=-1)
             lsm_noemb = torch.log_softmax(logits_noemb, dim=-1)

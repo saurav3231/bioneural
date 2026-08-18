@@ -40,6 +40,7 @@ class LearningConfig:
     lr_hidden: float = 0.05  # hidden-layer lr of the (2-layer) readout head
     head_hidden: int = 0  # >0: frozen random-feature (ELM) head width; 0 = plain linear head
     tied_embeddings: bool = False  # tied head: unstable when ctx contains emb[x] (self-referential)
+    lr_ctx_proj: float = 0.1  # task-aligned context projector P (continuous fp32) lr: P -= lr·d_ctx⊗h
     trace_decay: float = 0.95
     mod_gate_strength: float = 1.0
     shadow_update: float = 0.05
@@ -110,6 +111,7 @@ class BioNeuralConfig:
     device: str = "auto"
     batch_window: int = 0  # >1 enables the batched training path (many tokens per GPU op)
     ctx_embed_weight: float = 1.0  # direct sensory (bottom-up) strength in the readout context
+    ctx_proj_weight: float = 0.5  # task-aligned recurrent-state projector (P·h) in the readout context
     profile: bool = False  # per-phase wall-clock breakdown in the windowed training path
 
     quant: QuantConfig = field(default_factory=QuantConfig)
