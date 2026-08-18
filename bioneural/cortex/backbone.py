@@ -87,7 +87,7 @@ class EventSSM(nn.Module):
         h = torch.empty(w, self.dim, device=r.device)
         h_prev = self.h.detach().clone()
         carry = h_prev.double()
-        C = 32
+        C = 32  # a^{-C}·r must stay small enough that the O(1) carry isn't lost adding into the cumulative sum
         inv_a = (1.0 / a64).reshape(1, -1)
         for s in range(0, w, C):
             e = min(s + C, w)

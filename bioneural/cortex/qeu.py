@@ -60,15 +60,18 @@ def advance_qeu_tensors(
     Returns new (v, theta, trace, rate_delta, fire, potential).
     """
     dev = v.device
+    vi = v.to(device=dev, dtype=torch.int32)
+    ti = theta.to(device=dev, dtype=torch.int32)
+    tr = trace.to(device=dev, dtype=torch.int32)
     contrib_int = (contrib * MEMBRANE_SCALE).round().to(device=dev, dtype=torch.int32)
 
     # leak: v <- v - (v >> leak_bits)  == v * (1 - 2^-leak_bits), arithmetic shift
-    leak = v.to(torch.int32) - (v.to(torch.int32) >> leak_bits)
+    leak = vi - (vi >> leak_bits)
     v_new = leak + contrib_int
 
     potential = v_new.to(torch.float32) / MEMBRANE_SCALE
 
-    fire = v_new > theta.to(torch.int32)
+    fire = v_new > ti
 
     if wta_k is not None and wta_k > 0:
         # k winners within each column: keep the top-k firing neurons by potential
@@ -78,18 +81,18 @@ def advance_qeu_tensors(
         winner.scatter_(-1, topk, 1)
         fire = fire & winner.bool()
 
+    fire_i = fire.to(device=dev, dtype=torch.int32)
+
     # soft reset keeps residual info
-    v_new = torch.where(fire, v_new - theta.to(torch.int32), v_new)
+    v_new = torch.where(fire, v_new - ti, v_new)
 
     # homeostatic adaptive threshold
     theta_dp = int(theta_delta_plus * MEMBRANE_SCALE)
     theta_dm = int(theta_delta_minus * MEMBRANE_SCALE)
-    theta_new = theta.to(torch.int32) + fire.to(torch.int32) * theta_dp - theta_dm
-    theta_new = theta_new.clamp(min=int(0.2 * MEMBRANE_SCALE), max=int(5.0 * MEMBRANE_SCALE))
+    theta_new = (ti + fire_i * theta_dp - theta_dm).clamp(min=int(0.2 * MEMBRANE_SCALE), max=int(5.0 * MEMBRANE_SCALE))
 
     # eligibility trace: exponential decay + fire (INT8 saturation)
-    trace_dec = trace.to(torch.int32) - (trace.to(torch.int32) >> trace_decay_bits)
-    trace_new = (trace_dec + fire.to(torch.int32) * 127).clamp(min=-128, max=127)
+    trace_new = (tr - (tr >> trace_decay_bits) + fire_i * 127).clamp(min=-128, max=127)
 
     return (
         v_new.to(torch.int16),
