@@ -18,24 +18,35 @@ from bioneural.config import LearningConfig
 
 
 class ReadoutHead(nn.Module):
-    def __init__(self, dim_in: int, vocab_size: int, lcfg: LearningConfig, seed: int = 0):
+    def __init__(
+        self,
+        dim_in: int,
+        vocab_size: int,
+        lcfg: LearningConfig,
+        seed: int = 0,
+        tied_emb: torch.Tensor | None = None,
+    ):
         super().__init__()
         self.dim_in = dim_in
         self.vocab_size = vocab_size
         self.lcfg = lcfg
         g = torch.Generator().manual_seed(seed)
-        self.head_hidden = lcfg.head_hidden if lcfg else 0
-        out_dim = self.head_hidden if self.head_hidden > 0 else dim_in
-        self.register_buffer(
-            "W", (torch.randn(vocab_size, out_dim, generator=g) * 0.02).to(torch.float16)
-        )
-        self.head_hidden = lcfg.head_hidden if lcfg else 0
-        if self.head_hidden > 0:
-            mask = torch.rand(self.head_hidden, dim_in, generator=g) < 0.15
-            vals = torch.where(
-                torch.rand(self.head_hidden, dim_in, generator=g) < 0.5, 1.0, -1.0
+        self.tied = tied_emb is not None
+        self.head_hidden = 0 if self.tied else (lcfg.head_hidden if lcfg else 0)
+        if self.tied:
+            object.__setattr__(self, "_emb_ref", tied_emb)
+            self.register_buffer("logit_scale", torch.tensor(1.0))
+        else:
+            out_dim = self.head_hidden if self.head_hidden > 0 else dim_in
+            self.register_buffer(
+                "W", (torch.randn(vocab_size, out_dim, generator=g) * 0.02).to(torch.float16)
             )
-            self.register_buffer("W_fixed", (mask.float() * vals).to(torch.float16))
+            if self.head_hidden > 0:
+                mask = torch.rand(self.head_hidden, dim_in, generator=g) < 0.15
+                vals = torch.where(
+                    torch.rand(self.head_hidden, dim_in, generator=g) < 0.5, 1.0, -1.0
+                )
+                self.register_buffer("W_fixed", (mask.float() * vals).to(torch.float16))
         self.register_buffer("count", torch.zeros(vocab_size))
         self._rng = g
 
@@ -60,6 +71,8 @@ class ReadoutHead(nn.Module):
     def forward(self, ctx: torch.Tensor) -> torch.Tensor:
         """Logits over vocab for a (normalized) context vector."""
         ctx = self.normalize(ctx)
+        if self.tied:
+            return self.logit_scale * (ctx.to(torch.float16) @ self._emb_ref.to(torch.float16).t())
         return self._features(ctx).to(torch.float16) @ self.W.T  # (vocab,)
 
     # ------------------------------------------------------------------
@@ -69,6 +82,8 @@ class ReadoutHead(nn.Module):
     def forward_batch(self, ctx: torch.Tensor) -> torch.Tensor:
         """Logits for a (W, dim) batch of contexts -> (W, vocab)."""
         ctx = self.normalize_batch(ctx)
+        if self.tied:
+            return self.logit_scale * (ctx.to(torch.float16) @ self._emb_ref.to(torch.float16).t())
         return self._features_batch(ctx).to(torch.float16) @ self.W.T
 
     def learn_batch(
@@ -87,6 +102,33 @@ class ReadoutHead(nn.Module):
         """
         ctx = self.normalize_batch(ctx).to(torch.float16)
         ys = torch.tensor(y_pos, dtype=torch.long, device=ctx.device)
+        if self.tied:
+            # Tied embeddings: the shared embedding matrix is the output prototype store (GPT-2
+            # style). The softmax-gradient update below is the OUTPUT role of emb[v]; the returned
+            # d_ctx feeds the INPUT role (emb[x_t] -= lr*d_ctx) in the organism, so both directions
+            # get exact supervised signal. Prototype rows are L2-normalized each window, so logit
+            # sharpness must come from a learnable logit_scale (calibrated by the CE margin) instead
+            # of growing prototype norms.
+            emb32 = self._emb_ref.float()
+            logits = self.logit_scale * (ctx.float() @ emb32.t())  # (W, vocab)
+            p = torch.softmax(logits, dim=-1)
+            onehot = torch.zeros_like(p)
+            onehot.scatter_(1, ys[:, None], 1.0)
+            lr = self.lcfg.lr_readout * mod / (1.0 + self.count[ys].sqrt())  # (W,)
+            grad = (p - onehot) * lr[:, None]
+            upd = grad.t() @ ctx.float()  # (vocab, dim)
+            self._emb_ref.sub_(upd.to(self._emb_ref.dtype))
+            margin = (logits * onehot).sum(-1) - (logits * p).sum(-1)
+            self.logit_scale.add_(
+                (0.1 * self.lcfg.lr_readout * mod) * margin.clamp(-2.0, 2.0).mean()
+            )
+            self.logit_scale.clamp_(0.1, 20.0)
+            self.count[ys] += 1
+            # input-role top-down in ctx space. Scaled by logit_scale so it co-evolves with
+            # confidence exactly like the linear head's d_ctx grows with its prototype norm.
+            d_ctx = self.logit_scale * (p - onehot) @ emb32  # (W, dim)
+            d_ctx = d_ctx.clamp(-10.0, 10.0)
+            return d_ctx
         W32 = self.W.float()
         if self.head_hidden > 0:
             h = self._features_batch(ctx.float())  # (W, hidden)
@@ -126,17 +168,19 @@ class ReadoutHead(nn.Module):
 
     # ------------------------------------------------------------------
     def positive_phase(self, ctx: torch.Tensor, y_pos: int, mod: float = 1.0) -> None:
+        protos = self._emb_ref if self.tied else self.W
         ctx = self._features(self.normalize(ctx)).to(torch.float16)
         lr = self.lcfg.lr_readout * mod / (1.0 + self.count[y_pos].sqrt().item())
-        self.W[y_pos] += lr * ctx
-        self.W[y_pos] /= self.W[y_pos].norm() + 1e-8
+        protos[y_pos] += lr * ctx
+        protos[y_pos] /= protos[y_pos].norm() + 1e-8
         self.count[y_pos] += 1
 
     def negative_phase(self, ctx: torch.Tensor, y_neg: int, mod: float = 1.0) -> None:
+        protos = self._emb_ref if self.tied else self.W
         ctx = self._features(self.normalize(ctx)).to(torch.float16)
         lr = self.lcfg.lr_readout * mod / (1.0 + self.count[y_neg].sqrt().item())
-        self.W[y_neg] -= lr * ctx
-        self.W[y_neg] /= self.W[y_neg].norm() + 1e-8
+        protos[y_neg] -= lr * ctx
+        protos[y_neg] /= protos[y_neg].norm() + 1e-8
 
     def learn(
         self,
@@ -165,7 +209,9 @@ class ReadoutHead(nn.Module):
         return int(torch.multinomial(probs, 1).item())
 
     def stats(self) -> dict[str, float]:
+        protos = self._emb_ref if self.tied else self.W
         return {
-            "prototype_norm_mean": float(self.W.norm(dim=1).mean().item()),
+            "prototype_norm_mean": float(protos.norm(dim=1).mean().item()),
+            "logit_scale": float(self.logit_scale.item()) if self.tied else 0.0,
             "rows_touched": float((self.count > 0).sum().item()) / self.vocab_size,
         }

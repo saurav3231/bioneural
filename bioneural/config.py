@@ -39,6 +39,7 @@ class LearningConfig:
     lr_topdown: float = 0.05  # top-down error lr applied to the cortex readout projections
     lr_hidden: float = 0.05  # hidden-layer lr of the (2-layer) readout head
     head_hidden: int = 0  # >0: frozen random-feature (ELM) head width; 0 = plain linear head
+    tied_embeddings: bool = True  # share the token embedding as the readout output prototypes
     trace_decay: float = 0.95
     mod_gate_strength: float = 1.0
     shadow_update: float = 0.05

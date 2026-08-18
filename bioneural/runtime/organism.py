@@ -57,7 +57,13 @@ class BioNeural(nn.Module):
         )
         self.columns.profile = cfg.profile
         self.backbone = EventSSM(self.c.readout_dim, self.c.backbone_dim, self.c, self.lc)
-        self.readout = ReadoutHead(self.c.readout_dim, cfg.vocab_size, self.lc, seed=cfg.seed)
+        self.readout = ReadoutHead(
+            self.c.readout_dim,
+            cfg.vocab_size,
+            self.lc,
+            seed=cfg.seed,
+            tied_emb=self.emb.weight if self.lc.tied_embeddings else None,
+        )
 
         self.bus = NeuromodBus()
         self.clock = ClockBank(cfg.time)
@@ -312,8 +318,13 @@ class BioNeural(nn.Module):
         # makes input and output embeddings converge to the same "token -> internal state"
         # map (like tied embeddings), so the cortex gets structured, learnable input features.
         ys_t = torch.tensor(ys, dtype=torch.long, device=self.device)
-        delta = ctx.detach().float() - self.emb.weight[ys_t]
-        self.emb.weight.index_add_(0, ys_t, (delta * (0.04 * gate)).to(self.emb.weight.dtype))
+        if not self.lc.tied_embeddings:
+            # when tied, the head's output-role softmax gradient (which touches every prototype row
+            # with exact CE signal) subsumes this local Hebbian pull toward the predicting ctx.
+            delta = ctx.detach().float() - self.emb.weight[ys_t]
+            self.emb.weight.index_add_(
+                0, ys_t, (delta * (0.04 * gate)).to(self.emb.weight.dtype)
+            )
         # top-down (dopamine-style) supervised error through the head's reciprocal weights:
         # emb[x_t] -= lr·d_ctx — the exact gradient the readout would like to push onto the
         # input embedding, delivered locally via reciprocal connections (three-factor rule).
