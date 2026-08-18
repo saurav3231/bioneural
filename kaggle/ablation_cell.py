@@ -1,14 +1,16 @@
 # =============================================================================
-# BioNeural — ctx ABLATION diagnostic (3 min) + peak-ppl report
+# BioNeural — ctx ABLATION diagnostic (3-5 min) + peak-ppl report
 # =============================================================================
 # Trains at batch_window=384 for MINUTES minutes, then prints:
 #   * the best ppl/top1 seen (the ~103 peak, not the overfit 15-min number)
 #   * full ctx  : ppl / acc        (what the model actually reports)
 #   * emb only  : ppl / acc        (embedding anchor alone)
-#   * cortex    : ppl / acc        (backbone/cortex alone)
+#   * cortex    : ppl / acc        (backbone/cortex alone)  [EMBSSM=False]
+#   * ssm       : ppl / acc        (EmbSSM alone)           [EMBSSM=True]
 # Decision rule:
 #   emb ≈ full   -> cortex adds nothing; invest in embeddings/bigram
 #   cortex > rnd -> strengthen cortex (task-aligned backbone)
+#   ssm ≪ cortex -> EmbSSM's trained state carries the task signal
 # =============================================================================
 # ruff: noqa: E402
 
@@ -22,9 +24,10 @@ REPO_DIR = "/kaggle/working/bioneural"
 
 WINDOW = 384
 TICKS = 1
-MINUTES = 3        # 3 min hits the ~103 ppl peak; raise to 5 for more stability
+MINUTES = 5        # 3 min hits the ~103 ppl peak; 5 for more stability
 EVAL_TOK = 512
 EVAL_EVERY = 250_000
+EMBSSM = True     # train the EmbSSM readout path (continuous SSM over embeddings)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -76,6 +79,7 @@ cfg.vocab_size = cfg_vocab
 cfg.batch_window = WINDOW
 cfg.spike_ticks = TICKS
 cfg.profile = False
+cfg.embssm_readout = EMBSSM
 org = BioNeural(cfg)
 
 budget = MINUTES * 60.0
@@ -108,8 +112,12 @@ print("=" * 72)
 print("  ctx ablation (eval-only probes of the trained head):")
 print(f"    full ctx : ppl {ev['ppl']:>8.2f}  top1 {ev['acc']:.4f}  nll {ev['nll']:.3f}")
 print(f"    emb only : ppl {ev['ppl_emb']:>8.2f}  top1 {ev['acc_emb']:.4f}")
-print(f"    cortex   : ppl {ev['ppl_noemb']:>8.2f}  top1 {ev['acc_noemb']:.4f}")
-print("    BPE random floor ~= 1024  (cortex ~1024 = dead)")
+if EMBSSM:
+    print(f"    ssm      : ppl {ev['ppl_ssm']:>8.2f}  top1 {ev['acc_ssm']:.4f}")
+    print("    baseline v1 full ~104 / emb ~104;  cortex dead ~1034")
+else:
+    print(f"    cortex   : ppl {ev['ppl_noemb']:>8.2f}  top1 {ev['acc_noemb']:.4f}")
+    print("    BPE random floor ~= 1024  (cortex ~1024 = dead)")
 if best is not None:
     print(f"    best seen: ppl {best['ppl']:.2f} top1 {best['acc']:.3f} @ {best['t']:.0f}s")
 print("=" * 72)
