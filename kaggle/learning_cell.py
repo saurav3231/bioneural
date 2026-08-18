@@ -16,8 +16,8 @@ import time
 REPO_URL = "https://github.com/saurav3231/bioneural.git"
 REPO_DIR = "/kaggle/working/bioneural"
 
-WINDOW = 384  # best measured config: >10k tok/s with spike_ticks=2
-TICKS = 2
+WINDOW = 384  # best measured config: >10k tok/s
+TICKS = 1     # 1 = fastest (halves the column phase); 2 = richer temporal dynamics
 MINUTES = 15             # wall-clock training budget (loop the corpus until this hits)
 EVAL_TOK = 512
 EVAL_EVERY = 250_000     # report a row every 250k token-passes

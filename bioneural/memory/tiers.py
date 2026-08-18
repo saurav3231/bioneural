@@ -58,15 +58,16 @@ class WorkingMemory:
         self.dim = dim
         self.slots: list[WorkingSlot] = []
 
-    def write(self, key: torch.Tensor, payload: torch.Tensor, aCh: float = 0.5) -> None:
+    def write(self, key: torch.Tensor, payload: torch.Tensor, aCh: float = 0.5, now: float | None = None) -> None:
         # refresh-protection from ACh
         protected = aCh > 0.7
+        ts = now if now is not None else time.time()
         if len(self.slots) < self.n_slots:
-            self.slots.append(WorkingSlot(key, payload, 0.0, protected, time.time()))
+            self.slots.append(WorkingSlot(key, payload, 0.0, protected, ts))
             return
         # evict oldest (FIFO; protection is only a soft hint, age-based tick still drops old slots)
         self.slots.pop(0)
-        self.slots.append(WorkingSlot(key, payload, 0.0, protected, time.time()))
+        self.slots.append(WorkingSlot(key, payload, 0.0, protected, ts))
 
     def tick(self) -> None:
         for s in self.slots:
@@ -200,10 +201,11 @@ class EpisodicLog:
         mod_snapshot: dict | None = None,
         links: list | None = None,
         meta: str = "",
+        now: float | None = None,
     ) -> None:
         """Same as `add` with the packed bytes pre-computed (batched fast path)."""
         e = Engram(
-            time=time.time(),
+            time=now if now is not None else time.time(),
             key_bytes=blob,
             key=key,
             mod_snapshot=mod_snapshot or {},

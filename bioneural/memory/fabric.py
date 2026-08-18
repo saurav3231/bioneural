@@ -9,6 +9,7 @@ Every workspace cycle the fabric injects three influence streams:
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import torch
@@ -75,11 +76,12 @@ class MemoryFabric:
         dim = keys_c.shape[1]
         a_ch = (mod or {}).get("ACh", 0.5)
         da = (mod or {}).get("DA", 0.5)
+        now = time.time()
         for i in range(keys_c.shape[0]):
-            self.m1.write(keys_c[i], vals_c[i], aCh=a_ch)
+            self.m1.write(keys_c[i], vals_c[i], aCh=a_ch, now=now)
             self.m2a.write_precloned(keys_c[i], vals_c[i], mod=da)
             if novelties[i] >= 0.3 and blob is not None:
-                self.m2b.add_precloned(keys_c[i], blob[i * dim : (i + 1) * dim], meta=meta)
+                self.m2b.add_precloned(keys_c[i], blob[i * dim : (i + 1) * dim], meta=meta, now=now)
         self.m1.tick()
 
     def recall(self, key: torch.Tensor) -> dict:
