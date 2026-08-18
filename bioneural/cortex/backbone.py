@@ -44,7 +44,7 @@ class EventSSM(nn.Module):
     def forward(self, r: torch.Tensor) -> torch.Tensor:
         """Update the recurrent state with one event-driven readout vector `r`."""
         f = torch.sigmoid(self.forget)
-        r_proj = self.W_in @ r
+        r_proj = r @ self.W_in.t()
         self.h = ((1 - f) * self.h + r_proj).detach()
         self.pred_ctx = self.W_out @ self.h.detach()
         return self.h
@@ -89,7 +89,7 @@ class EventSSM(nn.Module):
         the window's last state so consecutive windows stay connected.
         """
         w = r.shape[0]
-        r_proj = self.W_in @ r  # (W, dim)
+        r_proj = r @ self.W_in.t()  # (W, dim)
         a = (1.0 - torch.sigmoid(self.forget)).clamp(min=0.1)  # (dim,), >=0.1 keeps inverses finite
         # exact linear-recurrence scan, O(W·dim): h_t = a⊙h_{t-1} + r_proj_t
         # chunked (C<=32) so a^{-j} exponents stay finite; done in fp64 so the huge intermediates
