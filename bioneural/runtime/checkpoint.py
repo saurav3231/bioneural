@@ -61,7 +61,7 @@ def load_body(org: BioNeural, path: str | Path) -> BioNeural:
     """Restore a previously saved body into `org` (which must have the same config)."""
     path = Path(path)
     payload = torch.load(path / "body.pt", map_location=org.device, weights_only=False)
-    org.load_state_dict(payload["state_dict"])
+    org.load_state_dict(payload["state_dict"], strict=False)
     aux = payload["aux"]
     org.clock.t0 = aux["clock_t0"]
     org.bus = aux["bus"]
