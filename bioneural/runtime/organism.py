@@ -483,12 +483,13 @@ class BioNeural(nn.Module):
     @torch.inference_mode()
     def _train_window_embssm(self, token_ids: list[int], w: int) -> dict:
         """EmbSSM training path (CE-only): the bigram head reads emb[x] (proven ~104 floor),
-        and the SSM adds a second head W_vocab·h_n over its normalized linear-attention state.
-        The SSM is trained END-TO-END by the combined CE gradient (exact closed-form, no
-        embedding-regression target — regression collapses onto the bigram-shifted embeddings
-        and cannot beat them). Self-stabilizing: an uninformative state drives W_vocab → ~0.
-        The ternary columns and self-predictive backbone are skipped entirely (measured dead
-        for the head: cortex-only ~475 ppl ≈ random floor).
+        and the SSM adds a second head β·W_vocab·h_n over its normalized linear-attention state.
+        The SSM is trained END-TO-END by the exact gradient of the COMBINED cross-entropy
+        (closed-form backward scan for W_in, no autograd) — this directly minimizes the reported
+        NLL, which residual-boosting failed to do. Self-stabilizing: an uninformative state
+        drives β → 0 / W_vocab → ~0 (pure bigram). The ternary columns and self-predictive
+        backbone are skipped entirely (measured dead for the head: cortex-only ~475 ppl ≈
+        random floor).
         """
         xs = token_ids[:w]
         ys = token_ids[1 : w + 1]
@@ -518,19 +519,18 @@ class BioNeural(nn.Module):
         if prof:
             ev[2].record()
 
-        # CE gradient of the combined logits -> SSM head W_vocab (scaled by β), β itself, and
-        # back into the state (W_in) via the exact backward scan. The SSM channel is trained on
-        # the BIGRAM RESIDUAL err_b = softmax(logits_bigram) − onehot (gradient boosting): it
-        # learns to correct exactly where the bigram fails, with a strong decoupled gradient
-        # (the combined-softmax gradient is weak and couples the two predictors). The bigram
-        # head's W keeps its own CE update.
-        p_b = torch.softmax(logits_bigram.float(), dim=-1)
-        onehot = torch.zeros_like(p_b)
+        # CE gradient of the COMBINED logits -> SSM head W_vocab (scaled by β), β itself, and
+        # back into the state (W_in) via the exact backward scan. The bigram head's W keeps its
+        # own CE update. The combined-softmax gradient directly minimizes the reported NLL
+        # (boosting on the bigram residual let the SSM's own confident-wrong guesses pollute
+        # other tokens: it improved top1 but raised ppl).
+        p = torch.softmax(logits.float(), dim=-1)
+        onehot = torch.zeros_like(p)
         onehot.scatter_(1, ys_t[:, None], 1.0)
-        err_b = p_b - onehot  # (W, vocab) bigram residual (boosting target)
-        dLdbeta = (err_b * logits_ssm).sum(dim=-1).mean()
+        err = p - onehot  # (W, vocab)
+        dLdbeta = (err * logits_ssm).sum(dim=-1).mean()
         self.embssm.train_beta(-gate * dLdbeta)
-        d_ssm = self.embssm.beta * err_b * gate  # (W, vocab)
+        d_ssm = self.embssm.beta * err * gate  # (W, vocab)
         self.embssm.train_head(d_ssm, h_n, mod=1.0)
         d_ctx = d_ssm.float() @ self.embssm.W_vocab.float()  # (W, dim) gradient on h_n
         self.embssm.apply_grad_ctx(d_ctx, embs, mod=1.0)

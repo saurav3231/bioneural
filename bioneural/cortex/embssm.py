@@ -10,12 +10,12 @@ autograd, no backprop-through-time:
     logits_ssm = W_vocab · h_n                    # second head over the L2-normalized state
 
 The bigram head (over emb[x]) is the proven ~104 floor and stays untouched; the SSM channel
-only adds logits, and W_vocab is CE-trained so an uninformative state drives it to ~0 — the
-model can never be worse than the bigram, and when the state carries higher-order structure it
-corrects exactly where the bigram fails.
+only adds logits, and its head is trained on the exact COMBINED cross-entropy gradient, so an
+uninformative state drives it to ~0 — the model can never be worse than the bigram, and when
+the state carries higher-order structure it corrects the bigram's mistakes.
 
 Gradients (exact, closed-form):
-    dW_vocab = (1/W) · Σ_t d_ssm_t ⊗ h_n_t                 (d_ssm = p − onehot on logits_ssm)
+    dW_vocab = (1/W) · Σ_t d_ssm_t ⊗ h_n_t              (d_ssm = β·(p − onehot) on the combined)
     dW_in    = (1/W) · Σ_t b_t ⊗ emb[x_t],  b_t = Σ_{s≥t} a^{s−t}·d_ctx_s
 
 where d_ctx = d_ssm @ W_vocab is the CE gradient routed back into the state. The state is
