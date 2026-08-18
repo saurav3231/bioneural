@@ -28,6 +28,7 @@ MINUTES = 5        # 3 min hits the ~103 ppl peak; 5 for more stability
 EVAL_TOK = 512
 EVAL_EVERY = 250_000
 EMBSSM = True     # train the EmbSSM readout path (continuous SSM over embeddings)
+EMBSSM_HIDDEN = 0  # 0 = linear state; >0 = frozen random-feature (ELM) map before the SSM head
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -80,6 +81,7 @@ cfg.batch_window = WINDOW
 cfg.spike_ticks = TICKS
 cfg.profile = False
 cfg.embssm_readout = EMBSSM
+cfg.embssm_hidden = EMBSSM_HIDDEN
 org = BioNeural(cfg)
 
 budget = MINUTES * 60.0

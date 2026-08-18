@@ -37,6 +37,8 @@ class EmbSSM(nn.Module):
         head_lr: float = 0.05,
         decay: float = 0.9,
         chunk: int = 32,
+        hidden: int = 0,
+        seed: int = 0,
     ):
         super().__init__()
         self.dim = dim
@@ -44,11 +46,17 @@ class EmbSSM(nn.Module):
         self.head_lr = head_lr
         self.a = decay
         self.chunk = chunk
+        self.hidden = hidden
         self.wd = 1e-4
         self.W_in = nn.Parameter(torch.randn(dim, dim) * 0.05)
-        self.W_vocab = nn.Parameter(torch.randn(vocab_size, dim) * 0.02)
+        self.W_vocab = nn.Parameter(torch.randn(vocab_size, max(hidden, dim)) * 0.02)
         self.beta = nn.Parameter(torch.tensor(1.0))  # mixing: logits += β·logits_ssm
         self.register_buffer("h", torch.zeros(dim))
+        if hidden > 0:
+            g = torch.Generator().manual_seed(seed)
+            mask = torch.rand(hidden, dim, generator=g) < 0.15
+            vals = torch.where(torch.rand(hidden, dim, generator=g) < 0.5, 1.0, -1.0)
+            self.register_buffer("W_fix", (mask.float() * vals))
         C = chunk
         rel = torch.arange(C).float().reshape(-1, 1)
         self.register_buffer("_apow", (self.a ** rel).to(torch.float32))
@@ -80,21 +88,45 @@ class EmbSSM(nn.Module):
         self.h = h_raw[-1].detach()
         return self._norm_state(h_raw), h_raw
 
+    def features(self, h_n: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Map the normalized state to head features. Linear pass-through, or a frozen-ReLU
+        random-feature (ELM) map when self.hidden > 0. Returns (features, pre-normalization)
+        so the exact ReLU-masked gradient can be routed back through."""
+        if self.hidden > 0:
+            h = torch.relu(h_n @ self.W_fix.t())  # (W, hidden)
+            return h / (h.norm(dim=-1, keepdim=True) + 1e-8), h
+        return h_n, h_n
+
     def logits(self, h_n: torch.Tensor) -> torch.Tensor:
-        """SSM channel logits: h_n @ W_vocab.t() -> (W, vocab)."""
-        return h_n.to(torch.float16) @ self.W_vocab.to(torch.float16).t()
+        """SSM channel logits: features @ W_vocab.t() -> (W, vocab)."""
+        feat, _ = self.features(h_n)
+        return feat.to(torch.float16) @ self.W_vocab.to(torch.float16).t()
 
     def forward(self, e: torch.Tensor) -> torch.Tensor:
         """Single-token step (generation / legacy path). Returns the SSM logits (vocab,)."""
         r = e @ self.W_in.t()
         self.h = (self.a * self.h + r).detach()
-        return self.W_vocab.to(torch.float16) @ self._norm_state(self.h).to(torch.float16)
+        return self.logits(self._norm_state(self.h))
 
     def train_head(self, d_logits: torch.Tensor, h_n: torch.Tensor, mod: float = 1.0) -> None:
         """Update W_vocab from the CE gradient on the SSM logits (d_logits = β·(p − onehot))."""
-        w = h_n.shape[0]
-        dW = (d_logits.float().t() @ h_n) / w
+        feat, _ = self.features(h_n)
+        w = feat.shape[0]
+        dW = (d_logits.float().t() @ feat) / w
         self.W_vocab.data.add_(self.head_lr * mod * dW.to(self.W_vocab.dtype))
+
+    def dctx_from_head(self, d_ssm: torch.Tensor, h_n: torch.Tensor) -> torch.Tensor:
+        """Route the head's CE gradient back to the state. Linear: d_ssm @ W_vocab. With the
+        frozen feature map: ReLU-masked (×2) projection through W_fix, gain-rescaled to the
+        output-layer gradient scale (same trick as the ELM readout head)."""
+        if self.hidden == 0:
+            return d_ssm.float() @ self.W_vocab.float()  # (W, dim)
+        feat, feat_pre = self.features(h_n)
+        dh = d_ssm.float() @ self.W_vocab.float()  # (W, hidden) w.r.t. normalized feat
+        d_pre = dh * (feat_pre > 0).float()  # ReLU mask
+        d_h = d_pre @ self.W_fix.float()  # (W, dim)
+        gain = dh.norm(dim=1, keepdim=True) / (d_h.norm(dim=1, keepdim=True) + 1e-8)
+        return d_h * gain
 
     def train_beta(self, grad_beta: torch.Tensor, mod: float = 1.0) -> None:
         """Update the mixing scalar from dL/dβ = Σ_v (p − onehot)_v · logits_ssm_v.

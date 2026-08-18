@@ -83,6 +83,8 @@ class BioNeural(nn.Module):
             head_lr=cfg.embssm_head_lr,
             decay=cfg.embssm_decay,
             chunk=cfg.batch_window,
+            hidden=cfg.embssm_hidden,
+            seed=cfg.seed,
         )
 
         self.bus = NeuromodBus()
@@ -532,7 +534,7 @@ class BioNeural(nn.Module):
         self.embssm.train_beta(-gate * dLdbeta)
         d_ssm = self.embssm.beta * err * gate  # (W, vocab)
         self.embssm.train_head(d_ssm, h_n, mod=1.0)
-        d_ctx = d_ssm.float() @ self.embssm.W_vocab.float()  # (W, dim) gradient on h_n
+        d_ctx = self.embssm.dctx_from_head(d_ssm, h_n)  # (W, dim) gradient on h_n
         self.embssm.apply_grad_ctx(d_ctx, embs, mod=1.0)
         if prof:
             ev[3].record()
