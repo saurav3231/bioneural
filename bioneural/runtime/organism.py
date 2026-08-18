@@ -362,8 +362,9 @@ class BioNeural(nn.Module):
         # task-aligned context projector update: P is a next-token-embedding predictor, so its
         # target is emb[y_{t+1}] (the unit-norm token embedding) — dL/dP ∝ (ph − emb[y]) ⊗ h_p.
         # Regression is stable (no dependence on the head's normalization) and self-bounding.
+        # Gradients are MEAN-normalized over the window (/w) so P can't blow up into ctx.
         errP = ph.float() - self.emb.weight[ys_t].float()  # (W, rd)
-        gP = (self.cfg.ctx_proj_weight * errP).t() @ h_p.float()  # (rd, dim)
+        gP = (self.cfg.ctx_proj_weight * errP).t() @ h_p.float() / w  # (rd, dim)
         self.ctx_proj.sub_((self.lc.lr_ctx_proj * gate * gP).to(self.ctx_proj.dtype))
 
         # sparse codes + novelty (batched)
