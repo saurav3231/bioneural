@@ -25,6 +25,7 @@ from bioneural.cortex.column import ColumnLayer
 from bioneural.cortex.embssm import EmbSSM
 from bioneural.cortex.event_bus import EventBus
 from bioneural.cortex.qeu import async_leak
+from bioneural.cortex.qstate import QState
 from bioneural.drives.homeostat import DriveEngine, DriveSignals
 from bioneural.io.spikes import spike_encode, spike_encode_batch
 from bioneural.learning.homeostat import apply_synaptic_scaling
@@ -75,18 +76,31 @@ class BioNeural(nn.Module):
         # closed-form gradients to predict the NEXT token's embedding. Its state h replaces the
         # ternary columns + self-predictive backbone as the head's long-range context when
         # `cfg.embssm_readout` is set; it is kept as a nn.Module so `.to(device)` and state_dict
-        # handling are free.
-        self.embssm = EmbSSM(
-            cfg.token_dim,
-            vocab_size=cfg.vocab_size,
-            lr=self.lc.lr_backbone,
-            head_lr=cfg.embssm_head_lr,
-            decay=cfg.embssm_decay,
-            chunk=cfg.batch_window,
-            hidden=cfg.embssm_hidden,
-            seed=cfg.seed,
-            decays=tuple(cfg.embssm_decays),
-        )
+        # handling are free. `cfg.embssm_qstate` swaps in the quantum-inspired complex unitary
+        # state (same interface: scan_window/logits/dctx_from_head/apply_grad_ctx/sdch).
+        if cfg.embssm_qstate:
+            self.embssm = QState(
+                cfg.embssm_qdim,
+                cfg.token_dim,
+                vocab_size=cfg.vocab_size,
+                lr=self.lc.lr_backbone,
+                head_lr=cfg.embssm_head_lr,
+                decay=cfg.embssm_qdecay,
+                pairs=cfg.embssm_qpairs,
+                seed=cfg.seed,
+            )
+        else:
+            self.embssm = EmbSSM(
+                cfg.token_dim,
+                vocab_size=cfg.vocab_size,
+                lr=self.lc.lr_backbone,
+                head_lr=cfg.embssm_head_lr,
+                decay=cfg.embssm_decay,
+                chunk=cfg.batch_window,
+                hidden=cfg.embssm_hidden,
+                seed=cfg.seed,
+                decays=tuple(cfg.embssm_decays),
+            )
 
         self.bus = NeuromodBus()
         self.clock = ClockBank(cfg.time)

@@ -103,3 +103,32 @@ def test_embssm_windowed_path():
     assert "ppl_ssm" in ev and "ppl_emb" in ev
     gen = org.generate([tokens[0]] * 4, n_tokens=8)
     assert len(gen) == 8
+
+
+def _second_order_tokens(n: int, seed: int = 0) -> list[int]:
+    import random
+
+    rng = random.Random(seed)
+    ids = [rng.randrange(4), rng.randrange(4)]
+    for _ in range(n):
+        ids.append((2 * ids[-1] + ids[-2]) % 4)
+    return ids
+
+
+def test_qstate_second_order_organism():
+    """QState must crack a 2nd-order Markov task inside the organism — the test the linear SSM
+    failed (β collapsed to the floor, acc stuck at random). The rule is unpredictable from the
+    bigram alone, so only a stateful higher-order channel can lift acc off the 0.25 floor."""
+    cfg = _tiny_cfg()
+    cfg.vocab_size = 4
+    cfg.batch_window = 16
+    cfg.embssm_readout = True
+    cfg.embssm_qstate = True
+    cfg.embssm_qdim = cfg.cortex.readout_dim // 2
+    tokens = _second_order_tokens(2048)
+    org = BioNeural(cfg)
+    org.train_sequence(tokens[:1536])
+    ev = org.evaluate_window(tokens[1536:])
+    assert ev["ppl"] > 1.0
+    assert org.embssm.beta.detach().item() > 0.1, f"beta collapsed: {org.embssm.beta.item()}"
+    assert ev["acc"] > 0.4, f"qstate did not learn 2nd-order structure: acc={ev['acc']}"

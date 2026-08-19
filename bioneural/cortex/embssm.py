@@ -155,11 +155,13 @@ class EmbSSM(nn.Module):
         return self.logits(self._norm_state(self.h))
 
     def train_head(self, d_logits: torch.Tensor, h_n: torch.Tensor, mod: float = 1.0) -> None:
-        """Update W_vocab from the CE gradient on the SSM logits (d_logits = β·(p − onehot))."""
+        """Update W_vocab from the CE gradient on the SSM logits (d_logits = β·(p − onehot)).
+        NOTE: this is gradient DESCENT (sub_) — the old sign bug here made the channel head
+        ascend the CE (learn confidently-wrong), which is why the SSM channel always collapsed."""
         feat, _ = self.features(h_n)
         w = feat.shape[0]
         dW = (d_logits.float().t() @ feat) / w
-        self.W_vocab.data.add_(self.head_lr * mod * dW.to(self.W_vocab.dtype))
+        self.W_vocab.data.sub_(self.head_lr * mod * dW.to(self.W_vocab.dtype))
 
     def dctx_from_head(self, d_ssm: torch.Tensor, h_n: torch.Tensor) -> list[torch.Tensor]:
         """Route the head's CE gradient back to each state channel. Linear: d_ssm @ W_vocab[:, c].
