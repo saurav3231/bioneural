@@ -585,7 +585,12 @@ class BioNeural(nn.Module):
         # neuromodulators / drives / stats
         ne = float(min(1.0, self.surprise.value))
         novelty_mean = sum(novelties) / max(w, 1)
-        self.bus.from_signals(ne, reward, novelty_mean, stability=max(0.0, 1.0 - ne))
+        # stability=0 to match the baseline gate: the baseline's surprise (~1.0, from the dead
+        # columns) gave stability 0, so 5HT stayed high and the gate ~0.50. The embssm surprise
+        # (1 - reward ~0.82) otherwise lowers stability, lifts 5HT and halves the gate (~0.28),
+        # starving the head/embedding learning (measured: bigram ~121 vs ~104 at the same token
+        # count). The reward signal is tracked separately, so the gate matches baseline dynamics.
+        self.bus.from_signals(ne, reward, novelty_mean, stability=0.0)
         self._acc_ema = 0.98 * self._acc_ema + 0.02 * reward
         self.drives.update(
             DriveSignals(
