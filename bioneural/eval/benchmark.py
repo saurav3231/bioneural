@@ -84,6 +84,7 @@ def _bio_eval_quality(org, val_tokens, gen_len=64, temperature=0.8, ref_sentence
     }
 
 
+@torch.inference_mode()
 def _one_shot_retention(org, toks_fact, checkpoints=(8, 16, 32), rng=None):
     rng = rng or random.Random(SEED)
     sdcs = []
@@ -131,6 +132,7 @@ def _idle_test(org, simulated_seconds=600.0):
     }
 
 
+@torch.inference_mode()
 def _autonomy_test(org, n_tries=10):
     org.drives.last_user_interaction = time.time() - 3600 * 3
     org.drives.drives["social"] = 0.9
