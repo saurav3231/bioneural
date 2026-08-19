@@ -74,15 +74,23 @@ class EmbSSM(nn.Module):
             vals = torch.where(torch.rand(hidden, dim * self.nch, generator=g) < 0.5, 1.0, -1.0)
             self.register_buffer("W_fix", (mask.float() * vals))
         C = chunk
-        rel = torch.arange(C).float()
+        # fp64 from the start: for a=0.5, C=384 the closed form needs 2^383 (~1e115) and
+        # 0.5^383 (~1e-115), both outside fp32's range (fp32 would produce inf/0 before any
+        # later .double() cast could save it).
+        rel = torch.arange(C).double()
         self.register_buffer("_apows", torch.stack([(a ** rel) for a in self.decays]))
         self.register_buffer("_invpows", torch.stack([((1.0 / a) ** rel) for a in self.decays]))
 
     # ------------------------------------------------------------------
     def _scan(self, r: torch.Tensor, carry: torch.Tensor, c: int) -> torch.Tensor:
-        """Closed-form forward scan h_t = a_c·h_{t-1} + r_t, chunked for low launch count."""
+        """Closed-form forward scan h_t = a_c·h_{t-1} + r_t, chunked for low launch count.
+        The closed form needs a^{-j} (up to (1/a)^C), which overflows fp32 for small decays
+        (a=0.5, C=384 -> 2^383 ~ 1e115 > fp32 max 3.4e38). The elementwise accumulation runs in
+        fp64; the input r and output h stay fp32 (the matmul that produces r is untouched)."""
         w = r.shape[0]
-        h = torch.empty(w, self.dim, device=r.device)
+        r64 = r.float().double()
+        carry64 = carry.double()
+        h64 = torch.empty(w, self.dim, device=r.device, dtype=torch.float64)
         C = self.chunk
         apow = self._apows[c, :C].unsqueeze(1)
         invpow = self._invpows[c, :C].unsqueeze(1)
@@ -90,11 +98,11 @@ class EmbSSM(nn.Module):
         for s in range(0, w, C):
             e = min(s + C, w)
             n = e - s
-            scaled = r[s:e] * invpow[:n]  # r_{s+j} · a^{-j}
-            res = apow[:n] * (carry.unsqueeze(0) + scaled.cumsum(0))
-            h[s:e] = res
-            carry = (a ** n) * res[-1]
-        return h
+            scaled = r64[s:e] * invpow[:n]  # r_{s+j} · a^{-j}
+            res = apow[:n] * (carry64.unsqueeze(0) + scaled.cumsum(0))
+            h64[s:e] = res
+            carry64 = (a ** n) * res[-1]
+        return h64.float()
 
     def _norm_state(self, h: torch.Tensor) -> torch.Tensor:
         return h / (h.norm(dim=-1, keepdim=True) + 1e-8)
