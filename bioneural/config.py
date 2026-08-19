@@ -123,6 +123,7 @@ class BioNeuralConfig:
     embssm_qdim: int = 128  # QState complex state dim (must be readout_dim/2 so SDC = [Re,Im] matches the fabric)
     embssm_qpairs: int = 16  # QState entanglement features: pairwise Re(h_i·conj(h_j)) on the first N amplitudes
     embssm_qdecay: float = 0.9  # QState leakage a (h_t = a·R·h_{t-1} + W_in·emb[x_t])
+    embssm_qlearn: bool = False  # train the QState qubit angles (θ, φ) so R adapts to the task
     profile: bool = False  # per-phase wall-clock breakdown in the windowed training path
 
     quant: QuantConfig = field(default_factory=QuantConfig)

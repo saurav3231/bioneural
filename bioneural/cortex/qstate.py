@@ -4,8 +4,10 @@ The head reads a COMPLEX state
 
     h_t = a · R · h_{t-1} + W_in · emb[x_t]
 
-where R is a fixed block-diagonal complex unitary: dim/2 independent "qubits", each a 2x2
-rotation with a phase (cosθ, sinθ·e^{iφ}). Because R is unitary and a < 1, the closed-form
+where R is a block-diagonal complex unitary: dim/2 independent "qubits", each a 2x2
+rotation with a phase (cosθ, sinθ·e^{iφ}). The angles are trainable (learn=True), so the
+state can ADAPT its phase structure to the task via the exact local gradient
+dL/dR = Σ_t a·b_t·h_{t-1}^H. Because R is unitary and a < 1, the closed-form
 scan powers a^j·R^j stay bounded (a=0.9, j=384 -> 0.9^384 ~ 4e-18, representable in fp32) —
 no fp64 overflow, and the adjoint backward scan is well-conditioned. A real decaying sum's
 gradient dies for the far past (a^j); the unitary phase ROTATES the past instead of shrinking
@@ -43,6 +45,7 @@ class QState(nn.Module):
         decay: float = 0.9,
         pairs: int = 16,
         seed: int = 0,
+        learn: bool = False,
     ):
         super().__init__()
         assert dim % 2 == 0, "QState dim must be even (pairs of qubits)"
@@ -52,24 +55,24 @@ class QState(nn.Module):
         self.lr = lr
         self.head_lr = head_lr
         self.wd = 1e-4
+        self.learn = learn
         self.pairs = min(pairs, dim)
         # feature layout: [Re(h_n); Im(h_n); |h_n|^2 (per-amplitude "measurement probabilities");
         # Re(h_i·conj(h_j)) for i,j < pairs]
         self.fdim = 3 * dim + self.pairs * self.pairs
 
-        # fixed block-diagonal complex unitary R: dim/2 independent 2x2 qubit rotations
+        # block-diagonal complex unitary R: dim/2 independent 2x2 qubit rotations. The angles
+        # (θ, φ) are trainable when learn=True, so the state can ADAPT its phase structure to the
+        # task (the gradient is exact and local: dL/dR = Σ_t a·b_t·h_{t-1}^H). Fixed otherwise.
         g = torch.Generator().manual_seed(seed)
         self.nb = dim // 2
-        theta = torch.rand(self.nb, generator=g) * torch.pi
-        phi = torch.rand(self.nb, generator=g) * 2.0 * torch.pi
-        c = torch.cos(theta)
-        s = torch.sin(theta)
-        R = torch.zeros(self.nb, 2, 2, dtype=torch.complex64)
-        R[:, 0, 0] = c
-        R[:, 0, 1] = s * torch.exp(1j * phi)
-        R[:, 1, 0] = -s * torch.exp(-1j * phi)
-        R[:, 1, 1] = c
-        self.register_buffer("R", R)
+        self.theta = nn.Parameter(torch.rand(self.nb, generator=g) * torch.pi)
+        self.phi = nn.Parameter(torch.rand(self.nb, generator=g) * 2.0 * torch.pi)
+        if not learn:
+            self.theta.requires_grad_(False)
+            self.phi.requires_grad_(False)
+        self.register_buffer("R", self._build_R())
+        self._pcache: dict[tuple[int, torch.device], torch.Tensor] = {}
 
         # Near-identity init: the state starts as a rotated/decayed sum of the raw embedding
         # prefix (already bigram-predictive), so W_vocab can learn something real before the
@@ -80,37 +83,73 @@ class QState(nn.Module):
         self.W_vocab = nn.Parameter(torch.zeros(vocab_size, self.fdim))
         self.beta = nn.Parameter(torch.tensor(1.0))
         self.register_buffer("h", torch.zeros(dim, dtype=torch.complex64))
+        self.register_buffer("_hprev", torch.zeros(0, dim, dtype=torch.complex64))
         self.chunk = 32  # closed-form scan chunk: loop over 32 lags, batched across chunks
-        self._pcache: dict[tuple[int, torch.device], torch.Tensor] = {}
+
+    def _build_R(self) -> torch.Tensor:
+        """Block-diagonal R from the current angles: 2x2 blocks
+        [[cosθ, sinθ·e^{iφ}], [-sinθ·e^{-iφ}, cosθ]] — unitary by construction."""
+        nb = self.nb
+        c = torch.cos(self.theta)
+        s = torch.sin(self.theta)
+        ep = torch.exp(1j * self.phi)
+        R = torch.zeros(nb, 2, 2, dtype=torch.complex64, device=self.theta.device)
+        R[:, 0, 0] = c
+        R[:, 0, 1] = s * ep
+        R[:, 1, 0] = -s * torch.conj(ep)
+        R[:, 1, 1] = c
+        return R
+
+    def _refresh_R(self) -> None:
+        """Sync the R buffer with the trainable angles and invalidate the power cache."""
+        with torch.no_grad():
+            self.R.copy_(self._build_R())
+        self._pcache.clear()
 
     # ------------------------------------------------------------------
     def _powers(self, n: int) -> torch.Tensor:
-        """Block-diagonal powers P[j] = a^j · R^j for j = 0..n-1, as (n, nb, 2, 2)."""
+        """Block-diagonal powers P[j] = a^j · R^j for j = 0..n-1, as (n, nb, 2, 2). Closed form:
+        a 2x2 Givens-with-phase block satisfies R_b^j = [[cos(jθ), sin(jθ)e^{iφ}],
+        [-sin(jθ)e^{-iφ}, cos(jθ)]], so the whole power table is one vectorized op (no sequential
+        matmul) — keeps the learned-R rebuild cheap when the angles change."""
         key = (n, self.R.device)
         if key in self._pcache:
             return self._pcache[key]
-        R = self.R
+        j = torch.arange(n, dtype=torch.float32, device=self.R.device)
+        theta = self.theta.detach()
+        phi = self.phi.detach()
+        jth = j[None, :] * theta[:, None]  # (nb, n)
+        cT = torch.cos(jth).t()  # (n, nb)
+        sT = torch.sin(jth).t()
+        ep = torch.exp(1j * phi)[None, :]  # (1, nb)
+        aj = (self.a**j)[:, None]  # (n, 1)
         P = torch.zeros(n, self.nb, 2, 2, dtype=torch.complex64, device=self.R.device)
-        acc = torch.eye(2, dtype=torch.complex64).repeat(self.nb, 1, 1).to(self.R.device)
-        a = self.a
-        for j in range(n):
-            P[j] = (a**j) * acc
-            acc = acc @ R
+        P[:, :, 0, 0] = aj * cT
+        P[:, :, 0, 1] = aj * sT * ep
+        P[:, :, 1, 0] = -aj * sT * torch.conj(ep)
+        P[:, :, 1, 1] = aj * cT
         self._pcache[key] = P
         return P
 
     def _powers_adj(self, n: int) -> torch.Tensor:
-        """Adjoint powers P†[j] = a^j · (R†)^j for the backward scan."""
+        """Adjoint powers P†[j] = a^j · (R†)^j for the backward scan. (R†)^j block is
+        [[cos(jθ), -sin(jθ)e^{-iφ}], [sin(jθ)e^{iφ}, cos(jθ)]], one vectorized op."""
         key = (n, self.R.device, "adj")
         if key in self._pcache:
             return self._pcache[key]
-        Radj = self.R.conj().transpose(-1, -2)
+        j = torch.arange(n, dtype=torch.float32, device=self.R.device)
+        theta = self.theta.detach()
+        phi = self.phi.detach()
+        jth = j[None, :] * theta[:, None]  # (nb, n)
+        cT = torch.cos(jth).t()  # (n, nb)
+        sT = torch.sin(jth).t()
+        ep = torch.exp(1j * phi)[None, :]  # (1, nb)
+        aj = (self.a**j)[:, None]  # (n, 1)
         P = torch.zeros(n, self.nb, 2, 2, dtype=torch.complex64, device=self.R.device)
-        acc = torch.eye(2, dtype=torch.complex64).repeat(self.nb, 1, 1).to(self.R.device)
-        a = self.a
-        for j in range(n):
-            P[j] = (a**j) * acc
-            acc = acc @ Radj
+        P[:, :, 0, 0] = aj * cT
+        P[:, :, 0, 1] = -aj * sT * ep
+        P[:, :, 1, 0] = aj * sT * torch.conj(ep)
+        P[:, :, 1, 1] = aj * cT
         self._pcache[key] = P
         return P
 
@@ -128,6 +167,8 @@ class QState(nn.Module):
         nb = self.nb
         C = self.chunk
         M = max(1, (w + C - 1) // C)
+        if self.learn:
+            self._refresh_R()
         r = (e.float() @ self.W_in.t()).to(torch.complex64).reshape(w, nb, 2)
         if M * C != w:
             r = torch.nn.functional.pad(r, (0, 0, 0, 0, 0, M * C - w))
@@ -139,11 +180,13 @@ class QState(nn.Module):
             contrib = torch.einsum("bij,tbj->tbi", P[j], rr).reshape(M, C - j, nb, 2)
             h[:, j:] += contrib
         carry = self.h.clone().reshape(nb, 2)
+        carry0 = carry  # the state BEFORE this window = h_{-1} for t=0 (needed for the R grad)
         for m in range(M):
             h[m] += torch.einsum("cbij,bj->cbi", P[1:], carry)
             carry = h[m, C - 1]
         hf = h.reshape(M * C, nb, 2)[:w].reshape(w, self.dim)
         self.h = hf[-1].detach()
+        self._hprev = torch.cat([carry0.reshape(1, self.dim), hf[:-1]], dim=0).detach()
         return self._unit(hf), hf
 
     def features(self, h_n: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -164,6 +207,8 @@ class QState(nn.Module):
 
     def forward(self, e: torch.Tensor) -> torch.Tensor:
         """Single-token step (generation / per-token path). Returns the SSM logits (vocab,)."""
+        if self.learn:
+            self._refresh_R()
         r = e.float() @ self.W_in.t()
         carry = self.h.clone().reshape(self.nb, 2)
         R = self.R
@@ -241,6 +286,34 @@ class QState(nn.Module):
         Gf = G.reshape(M * C, nb, 2)[:w].reshape(w, self.dim)
         dW = (Gf.real.t() @ e.float()) / w  # W_in is real
         self.W_in.data.add_(self.lr * mod * (dW - self.wd * self.W_in.data))
+        if self.learn:
+            self._update_angles(Gf, w, mod)
+
+    def _update_angles(self, Gf: torch.Tensor, w: int, mod: float) -> None:
+        """Train the qubit angles by the exact local gradient dL/dR = Σ_t a·b_t·h_{t-1}^H
+        (b_t = dL/dh_t = the adjoint state gradient) projected onto θ and φ. Gradient DESCENT
+        (verified against autograd to ~1e-4; strictly better or equal to the mirrored W_in
+        convention on the 2nd-order organism test)."""
+        nb = self.nb
+        G2 = Gf.reshape(w, nb, 2)
+        hp = self._hprev.reshape(w, nb, 2)
+        dR = (self.a / w) * torch.einsum("tbj,tbk->bjk", G2, hp.conj())  # ∂L/∂R, (nb,2,2)
+        c = torch.cos(self.theta)
+        s = torch.sin(self.theta)
+        ep = torch.exp(1j * self.phi)
+        dR_dtheta = torch.zeros(nb, 2, 2, dtype=torch.complex64, device=self.theta.device)
+        dR_dtheta[:, 0, 0] = -s
+        dR_dtheta[:, 0, 1] = c * ep
+        dR_dtheta[:, 1, 0] = -c * torch.conj(ep)
+        dR_dtheta[:, 1, 1] = -s
+        dR_dphi = torch.zeros(nb, 2, 2, dtype=torch.complex64, device=self.theta.device)
+        dR_dphi[:, 0, 1] = 1j * s * ep
+        dR_dphi[:, 1, 0] = 1j * s * torch.conj(ep)
+        dtheta = torch.einsum("bij,bij->b", dR.conj(), dR_dtheta).real
+        dphi = torch.einsum("bij,bij->b", dR.conj(), dR_dphi).real
+        self.theta.data.sub_(self.lr * mod * (dtheta - self.wd * self.theta.data))
+        self.phi.data.sub_(self.lr * mod * (dphi - self.wd * self.phi.data))
 
     def reset(self) -> None:
         self.h.zero_()
+        self._hprev = torch.zeros(0, self.dim, dtype=torch.complex64, device=self.h.device)

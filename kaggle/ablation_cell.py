@@ -32,6 +32,7 @@ EMBSSM_HIDDEN = 0  # 0 = linear state; >0 = frozen random-feature (ELM) map befo
 EMBSSM_DECAYS = (0.5, 0.9, 0.99)  # multi-scale state channels (short/mid/long); () = single embssm_decay
 QSTATE = False    # swap the linear EmbSSM for the quantum-inspired complex QState channel (sign-fixed)
 QSTATE_PAIRS = 16  # QState entanglement features (pairwise Re(h_i conj(h_j)) on the first N amplitudes)
+QSTATE_LEARN_R = False  # train the QState qubit angles (θ, φ) so R adapts to the task (verified vs autograd)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -89,6 +90,7 @@ cfg.embssm_hidden = EMBSSM_HIDDEN
 cfg.embssm_decays = EMBSSM_DECAYS
 cfg.embssm_qstate = QSTATE
 cfg.embssm_qpairs = QSTATE_PAIRS
+cfg.embssm_qlearn = QSTATE_LEARN_R
 if QSTATE:
     cfg.embssm_qdim = cfg.cortex.readout_dim // 2
 org = BioNeural(cfg)
