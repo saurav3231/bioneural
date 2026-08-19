@@ -60,7 +60,14 @@ class EmbSSM(nn.Module):
         self.wd = 1e-4
         self.d_head = dim * self.nch if hidden == 0 else hidden
         self.W_in = nn.ParameterList(
-            [nn.Parameter(torch.randn(dim, dim) * 0.05) for _ in self.decays]
+            [
+                # Near-identity init: the state starts as a decaying sum of the raw embeddings
+                # (already bigram-predictive), so W_vocab can learn something real before the
+                # routed gradient refines W_in. Random W_in makes the state noise -> W_vocab
+                # learns confidently-wrong -> beta collapses to the floor -> W_in starves.
+                nn.Parameter(torch.eye(dim) + torch.randn(dim, dim) * 0.05)
+                for _ in self.decays
+            ]
         )
         # W_vocab starts at ZERO: the SSM channel begins perfectly neutral, so β's gradient
         # starts at zero (no worse-than-random cold-start collapse) and the channel learns
