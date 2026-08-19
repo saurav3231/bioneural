@@ -191,7 +191,10 @@ class BioNeural(nn.Module):
         logits_ssm = self.embssm.forward(emb)
         ctx = self.cfg.ctx_embed_weight * emb
         ctx_hebb = ctx
-        logits = self.readout.forward(ctx).float() + self.embssm.beta * logits_ssm.float()
+        if self.cfg.embssm_mix:
+            logits = self.readout.forward(ctx).float() + self.embssm.beta * logits_ssm.float()
+        else:
+            logits = self.readout.forward(ctx).float()
 
         sdc = make_sdc(self.embssm.sdch(self.embssm.h.detach()), active_frac=0.05, ternary=True)
         novelty = (1.0 - sdc_similarity(sdc, self._prev_sdc)) if self._prev_sdc is not None else 0.5
@@ -515,7 +518,10 @@ class BioNeural(nn.Module):
         ctx = self.cfg.ctx_embed_weight * embs
         logits_bigram = self.readout.forward_batch(ctx).float()
         logits_ssm = self.embssm.logits(h_n).float()
-        logits = logits_bigram + self.embssm.beta * logits_ssm
+        if self.cfg.embssm_mix:
+            logits = logits_bigram + self.embssm.beta * logits_ssm
+        else:
+            logits = logits_bigram
         preds = logits.argmax(dim=-1).tolist()  # one sync per window
         correct = sum(1 for p, y in zip(preds, ys, strict=False) if p == y)
         self.readout.learn_batch(ctx, ys, mod=gate)
@@ -531,12 +537,13 @@ class BioNeural(nn.Module):
         onehot = torch.zeros_like(p)
         onehot.scatter_(1, ys_t[:, None], 1.0)
         err = p - onehot  # (W, vocab)
-        dLdbeta = (err * logits_ssm).sum(dim=-1).mean()
-        self.embssm.train_beta(-gate * dLdbeta)
-        d_ssm = self.embssm.beta * err * gate  # (W, vocab)
-        self.embssm.train_head(d_ssm, h_n, mod=1.0)
-        d_ctx = self.embssm.dctx_from_head(d_ssm, h_n)  # list of (W, dim) per channel
-        self.embssm.apply_grad_ctx(d_ctx, embs, mod=1.0)
+        if self.cfg.embssm_mix:
+            dLdbeta = (err * logits_ssm).sum(dim=-1).mean()
+            self.embssm.train_beta(-gate * dLdbeta)
+            d_ssm = self.embssm.beta * err * gate  # (W, vocab)
+            self.embssm.train_head(d_ssm, h_n, mod=1.0)
+            d_ctx = self.embssm.dctx_from_head(d_ssm, h_n)  # list of (W, dim) per channel
+            self.embssm.apply_grad_ctx(d_ctx, embs, mod=1.0)
         if prof:
             ev[3].record()
 
@@ -751,7 +758,10 @@ class BioNeural(nn.Module):
             ctx_emb = self.cfg.ctx_embed_weight * embs
             logits_emb = self.readout.forward_batch(ctx_emb).float()
             logits_ssm = self.embssm.logits(h_n).float()
-            logits = logits_emb + self.embssm.beta * logits_ssm
+            if self.cfg.embssm_mix:
+                logits = logits_emb + self.embssm.beta * logits_ssm
+            else:
+                logits = logits_emb
             lsm = torch.log_softmax(logits, dim=-1)
             lsm_emb = torch.log_softmax(logits_emb, dim=-1)
             lsm_ssm = torch.log_softmax(logits_ssm, dim=-1)

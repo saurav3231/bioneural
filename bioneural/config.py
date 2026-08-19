@@ -114,6 +114,7 @@ class BioNeuralConfig:
     ctx_embed_weight: float = 1.0  # direct sensory (bottom-up) strength in the readout context
     ctx_proj_weight: float = 1.0  # task-aligned next-token-embedding predictor (P·h_p) in the readout context
     embssm_readout: bool = False  # predictive path via trained linear-attention over embeddings (EmbSSM)
+    embssm_mix: bool = True  # add the SSM head's β·logits to the bigram; False = pure fast bigram (SSM runs only for state/SDC)
     embssm_decay: float = 0.9  # EmbSSM state leakage a (h_t = a·h_{t-1} + W_in·emb[x_t])
     embssm_decays: tuple = ()  # multi-scale state: concatenated channels at these leakages (short/mid/long); empty -> single (embssm_decay,)
     embssm_head_lr: float = 0.05  # CE-trained SSM head (W_vocab) lr over the normalized state
