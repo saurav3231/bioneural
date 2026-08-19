@@ -80,6 +80,7 @@ class QState(nn.Module):
         self.W_vocab = nn.Parameter(torch.zeros(vocab_size, self.fdim))
         self.beta = nn.Parameter(torch.tensor(1.0))
         self.register_buffer("h", torch.zeros(dim, dtype=torch.complex64))
+        self.chunk = 32  # closed-form scan chunk: loop over 32 lags, batched across chunks
         self._pcache: dict[tuple[int, torch.device], torch.Tensor] = {}
 
     # ------------------------------------------------------------------
@@ -118,22 +119,32 @@ class QState(nn.Module):
 
     # ------------------------------------------------------------------
     def scan_window(self, e: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Closed-form complex forward scan over a window of embeddings. Returns the
-        L2-normalized complex state (W, dim), the raw state (W, dim); advances the carry."""
+        """Closed-form complex forward scan over a window of embeddings, CHUNKED for speed.
+        The window is split into M = w/C chunks; the internal cross-lag convolution runs as one
+        batched loop over the C lags (vectorized across chunks), and only the M-chunk carry chain
+        is sequential. Returns the L2-normalized complex state (W, dim), the raw state (W, dim);
+        advances the carry."""
         w = e.shape[0]
-        device = e.device
-        r = (e.float() @ self.W_in.t()).to(torch.complex64).reshape(w, self.nb, 2)
-        P = self._powers(w)
-        carry = self.h.clone().reshape(self.nb, 2)
-        h_raw = torch.zeros(w, self.dim, dtype=torch.complex64, device=device)
-        for j in range(w):
-            # carry contributes to h[j] via P[j]; inputs r[s] contribute to h[s+j] via P[j]
-            cterm = torch.einsum("bij,bj->bi", P[j], carry).reshape(-1)
-            h_raw[j] += cterm
-            contrib = torch.einsum("bij,tbj->tbi", P[j], r[: w - j]).reshape(w - j, self.dim)
-            h_raw[j:] += contrib
-        self.h = h_raw[-1].detach()
-        return self._unit(h_raw), h_raw
+        nb = self.nb
+        C = self.chunk
+        M = max(1, (w + C - 1) // C)
+        r = (e.float() @ self.W_in.t()).to(torch.complex64).reshape(w, nb, 2)
+        if M * C != w:
+            r = torch.nn.functional.pad(r, (0, 0, 0, 0, 0, M * C - w))
+        r = r.reshape(M, C, nb, 2)
+        P = self._powers(C + 1)  # (C+1, nb, 2, 2); input lags use [0:C], carry uses [1:]
+        h = torch.zeros(M, C, nb, 2, dtype=torch.complex64, device=e.device)
+        for j in range(C):
+            rr = r[:, : C - j].reshape(M * (C - j), nb, 2)
+            contrib = torch.einsum("bij,tbj->tbi", P[j], rr).reshape(M, C - j, nb, 2)
+            h[:, j:] += contrib
+        carry = self.h.clone().reshape(nb, 2)
+        for m in range(M):
+            h[m] += torch.einsum("cbij,bj->cbi", P[1:], carry)
+            carry = h[m, C - 1]
+        hf = h.reshape(M * C, nb, 2)[:w].reshape(w, self.dim)
+        self.h = hf[-1].detach()
+        return self._unit(hf), hf
 
     def features(self, h_n: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Map the (complex) normalized state to real head features: Re/Im amplitudes,
@@ -201,16 +212,34 @@ class QState(nn.Module):
         self.beta.data.clamp_(0.05, 4.0)
 
     def apply_grad_ctx(self, d_ctx: list[torch.Tensor], e: torch.Tensor, mod: float = 1.0) -> None:
-        """Train W_in by the exact complex adjoint backward scan of the recurrence."""
+        """Train W_in by the exact complex adjoint backward scan of the recurrence (chunked).
+
+        dL/dr[m, i] = Σ_{j≥i} P†[j−i]·dL/dh[m, j], with the cross-chunk carry gradient
+        dL/dcarry_m = Σ_j P†[j+1]·dL/dh[m, j]. The internal adjoint is batched over chunks; the
+        carry chain (M steps) contributes the tail terms P†[C−1−i]·dL/dcarry_{m+1}."""
         d = d_ctx[0]
         w = d.shape[0]
-        Padj = self._powers_adj(w)
-        b = torch.zeros_like(d)
-        dj = d.reshape(w, self.nb, 2)
-        for j in range(w):
-            contrib = torch.einsum("bij,tbj->tbi", Padj[j], dj[j:])
-            b[: w - j] += contrib.reshape(w - j, self.dim)
-        dW = (b.real.t() @ e.float()) / w  # W_in is real
+        nb = self.nb
+        C = self.chunk
+        M = max(1, (w + C - 1) // C)
+        dj = d.reshape(w, nb, 2)
+        if M * C != w:
+            dj = torch.nn.functional.pad(dj, (0, 0, 0, 0, 0, M * C - w))
+        dj = dj.reshape(M, C, nb, 2)
+        Padj = self._powers_adj(C + 1)
+        G = torch.zeros(M, C, nb, 2, dtype=torch.complex64, device=d.device)
+        for j in range(C):
+            dd = dj[:, j:].reshape(M * (C - j), nb, 2)
+            contrib = torch.einsum("bij,tbj->tbi", Padj[j], dd).reshape(M, C - j, nb, 2)
+            G[:, : C - j] += contrib
+        c = torch.einsum("mcbj,cbij->mbi", dj, Padj[1:])  # (M, nb, 2) = dL/dcarry_m (direct)
+        acc = torch.zeros(nb, 2, dtype=torch.complex64, device=d.device)
+        for m in reversed(range(M)):
+            tail = torch.einsum("cbij,bj->cbi", torch.flip(Padj[:C], dims=[0]), acc)
+            G[m] += tail
+            acc = c[m] + torch.einsum("bij,bj->bi", Padj[C], acc)
+        Gf = G.reshape(M * C, nb, 2)[:w].reshape(w, self.dim)
+        dW = (Gf.real.t() @ e.float()) / w  # W_in is real
         self.W_in.data.add_(self.lr * mod * (dW - self.wd * self.W_in.data))
 
     def reset(self) -> None:
