@@ -30,6 +30,8 @@ EVAL_EVERY = 250_000
 EMBSSM = True     # train the EmbSSM readout path (continuous SSM over embeddings)
 EMBSSM_HIDDEN = 0  # 0 = linear state; >0 = frozen random-feature (ELM) map before the SSM head
 EMBSSM_DECAYS = (0.5, 0.9, 0.99)  # multi-scale state channels (short/mid/long); () = single embssm_decay
+QSTATE = False    # swap the linear EmbSSM for the quantum-inspired complex QState channel (sign-fixed)
+QSTATE_PAIRS = 16  # QState entanglement features (pairwise Re(h_i conj(h_j)) on the first N amplitudes)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -85,6 +87,10 @@ cfg.profile = False
 cfg.embssm_readout = EMBSSM
 cfg.embssm_hidden = EMBSSM_HIDDEN
 cfg.embssm_decays = EMBSSM_DECAYS
+cfg.embssm_qstate = QSTATE
+cfg.embssm_qpairs = QSTATE_PAIRS
+if QSTATE:
+    cfg.embssm_qdim = cfg.cortex.readout_dim // 2
 org = BioNeural(cfg)
 
 budget = MINUTES * 60.0
@@ -119,7 +125,8 @@ print("  ctx ablation (eval-only probes of the trained head):")
 print(f"    full ctx : ppl {ev['ppl']:>8.2f}  top1 {ev['acc']:.4f}  nll {ev['nll']:.3f}")
 print(f"    emb only : ppl {ev['ppl_emb']:>8.2f}  top1 {ev['acc_emb']:.4f}")
 if EMBSSM:
-    print(f"    ssm      : ppl {ev['ppl_ssm']:>8.2f}  top1 {ev['acc_ssm']:.4f}")
+    chan = "QState (complex unitary)" if QSTATE else "EmbSSM (linear)"
+    print(f"    ssm      : ppl {ev['ppl_ssm']:>8.2f}  top1 {ev['acc_ssm']:.4f}   [{chan}, sign-fixed]")
     print("    baseline v1 full ~104 / emb ~104;  cortex dead ~1034")
 else:
     print(f"    cortex   : ppl {ev['ppl_noemb']:>8.2f}  top1 {ev['acc_noemb']:.4f}")
