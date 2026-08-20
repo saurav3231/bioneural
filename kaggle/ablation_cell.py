@@ -35,7 +35,9 @@ QSTATE_LEARN_R = True  # train the QState qubit angles (θ, φ) so R adapts to t
 QSTATE_SCALES = ()  # single QState decay; multi-scale would be (0.5, 0.9, 0.99)
 QSTATE_TAPS = 3  # readout taps: concat [Re, Im] of the last K state rows (recent-token decode)
 QSTATE_HIDDEN = 1024  # >0: frozen sparse random-feature (ELM) map on the QState features before the head
-QSTATE_COMPILE = False  # torch.compile the REAL QState kernels (complex conv stays eager; inductor miscompiles complex)
+QSTATE_COMPILE = True  # torch.compile the REAL QState kernels (complex conv stays eager; safe now)
+QSTATE_AUX = 1.0  # auxiliary SSM-alone CE weight: train the channel's OWN next-token CE so it becomes a strong predictor, not just a bigram fixer (0 = off)
+SKIP_BIO = True  # drop the SDC/workspace/fabric memory + synaptic scaling from embssm windows (not the predictor; big tps win)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -96,6 +98,8 @@ cfg.embssm_qdecays = QSTATE_SCALES
 cfg.embssm_qtaps = QSTATE_TAPS
 cfg.embssm_qhidden = QSTATE_HIDDEN
 cfg.embssm_qcompile = QSTATE_COMPILE
+cfg.embssm_qaux = QSTATE_AUX
+cfg.embssm_skipbio = SKIP_BIO
 if QSTATE:
     cfg.embssm_qdim = cfg.cortex.readout_dim // 2
 org = BioNeural(cfg)

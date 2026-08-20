@@ -542,8 +542,7 @@ class BioNeural(nn.Module):
             logits = logits_bigram + self.embssm.beta * logits_ssm
         else:
             logits = logits_bigram
-        preds = logits.argmax(dim=-1).tolist()  # one sync per window
-        correct = sum(1 for p, y in zip(preds, ys, strict=False) if p == y)
+        correct = int(torch.eq(logits.argmax(dim=-1), ys_t).sum().item())  # no 384-item list sync
         self.readout.learn_batch(ctx, ys, mod=gate)
         if prof:
             ev[2].record()
@@ -558,6 +557,14 @@ class BioNeural(nn.Module):
         onehot.scatter_(1, ys_t[:, None], 1.0)
         err = p - onehot  # (W, vocab)
         if self.cfg.embssm_mix:
+            # Auxiliary channel CE: also train W_vocab/state to predict the next token from the
+            # channel ALONE (softmax over β·logits_ssm). Without it the channel only ever fixes
+            # the bigram's residual errors, so it can never become the dominant predictor
+            # (measured: ssm-alone ppl ~600-750 vs emb ~101). The blend is the combined gradient
+            # plus λ_aux of the standalone gradient.
+            if self.cfg.embssm_qaux > 0:
+                p_ssm = torch.softmax((self.embssm.beta * logits_ssm).float(), dim=-1)
+                err = err + self.cfg.embssm_qaux * (p_ssm - onehot)
             dLdbeta = (err * logits_ssm).sum(dim=-1).mean()
             self.embssm.train_beta(-gate * dLdbeta)
             d_ssm = self.embssm.beta * err * gate  # (W, vocab)
@@ -591,21 +598,26 @@ class BioNeural(nn.Module):
         self.surprise.update(min(1.0, max(0.0, 1.0 - reward)))
 
         # sparse codes + novelty from the continuous SSM state h (single mid-decay channel —
-        # the memory key must stay at the fabric's readout dim)
-        sdcs = make_sdc_batch(self.embssm.sdch(h_n), active_frac=0.05, ternary=True)
-        if w > 1:
-            sims = sdc_similarity_batch(sdcs[:-1], sdcs[1:])
-            novelties = [0.5] + [1.0 - s for s in sims]
+        # the memory key must stay at the fabric's readout dim). Skipped when embssm_skipbio:
+        # the SDC/workspace/fabric memory is not the predictor and is pure per-window overhead.
+        if self.cfg.embssm_skipbio:
+            novelties = [0.5] * w
         else:
-            novelties = [0.5]
+            sdcs = make_sdc_batch(self.embssm.sdch(h_n), active_frac=0.05, ternary=True)
+            if w > 1:
+                sims = sdc_similarity_batch(sdcs[:-1], sdcs[1:])
+                novelties = [0.5] + [1.0 - s for s in sims]
+            else:
+                novelties = [0.5]
 
-        # workspace + memory (per-window, batched flush)
-        self.workspace.compete([sdcs[-1]], [novelties[-1]])
-        if self._prev_sdc is not None and w > 1:
-            keys = torch.cat([self._prev_sdc.unsqueeze(0), sdcs[:-1]], dim=0)
-        else:
-            keys = sdcs
-        self.fabric.write_experience_batch(keys, sdcs, novelties, self.bus.broadcast())
+            # workspace + memory (per-window, batched flush)
+            self.workspace.compete([sdcs[-1]], [novelties[-1]])
+            if self._prev_sdc is not None and w > 1:
+                keys = torch.cat([self._prev_sdc.unsqueeze(0), sdcs[:-1]], dim=0)
+            else:
+                keys = sdcs
+            self.fabric.write_experience_batch(keys, sdcs, novelties, self.bus.broadcast())
+            self._prev_sdc = sdcs[-1].detach()
         if prof:
             ev[5].record()
 
@@ -630,15 +642,15 @@ class BioNeural(nn.Module):
         )
 
         self._prev_r = h_n[-1].detach()
-        self._prev_sdc = sdcs[-1].detach()
         self._last_ctx = ctx[-1]
         self.total_tokens += w
         self.total_correct += correct
 
-        self._steps_since_homeo += w
-        if self._steps_since_homeo >= 50:
-            apply_synaptic_scaling(self.columns, self.c.target_rate)
-            self._steps_since_homeo = 0
+        if not self.cfg.embssm_skipbio:
+            self._steps_since_homeo += w
+            if self._steps_since_homeo >= 50:
+                apply_synaptic_scaling(self.columns, self.c.target_rate)
+                self._steps_since_homeo = 0
 
         if prof:
             ev[6].record()
