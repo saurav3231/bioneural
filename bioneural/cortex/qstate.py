@@ -40,8 +40,11 @@ combined logits exactly like EmbSSM, so an uninformative state drives β -> 0 / 
 
 The cross-lag convolutions are block-Toeplitz matrix products (cached, rebuilt only when the
 learned angles change), so each scan is one batched matmul + an M-step carry chain instead of
-a C-lag einsum loop. With compile=True the hot kernels (Toeplitz conv, pairwise einsum, head
-matmul) are torch.compile'd (CUDA only; falls back to eager on CPU or any compile failure).
+a C-lag einsum loop. With compile=True the REAL kernels (pairwise einsum decomposed into
+real·real + imag·imag, and the head matmul) are torch.compile'd (CUDA only; eager fallback on
+CPU or any compile failure). The COMPLEX Toeplitz conv is deliberately kept eager — inductor
+does not support complex codegen and silently miscompiles it (measured: ssm ppl exploded to
+~10^8 on Kaggle).
 """
 
 from __future__ import annotations
@@ -50,14 +53,10 @@ import torch
 import torch.nn as nn
 
 
-def _qconv_einsum(T: torch.Tensor, rtilde: torch.Tensor) -> torch.Tensor:
-    """Batched block-Toeplitz convolution: (nch, nb, 2C, 2C) x (M, nch, nb, 2C)."""
-    return torch.einsum("cblk,mcbk->mcbl", T, rtilde)
-
-
-def _qpairs_einsum(sub: torch.Tensor) -> torch.Tensor:
-    """Pairwise entanglement features Re(h_i·conj(h_j)) on (w, nch, p) amplitudes."""
-    return torch.einsum("wci,wcj->wcij", sub, sub.conj()).real
+def _qpairs_einsum(real: torch.Tensor, imag: torch.Tensor) -> torch.Tensor:
+    """Pairwise entanglement features Re(h_i·conj(h_j)) = Re_i·Re_j + Im_i·Im_j, computed as
+    two REAL einsums so it is safe to torch.compile (inductor miscompiles complex ops)."""
+    return torch.einsum("wci,wcj->wcij", real, real) + torch.einsum("wci,wcj->wcij", imag, imag)
 
 
 def _head_mm(feat: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
@@ -153,25 +152,22 @@ class QState(nn.Module):
             self.register_buffer("W_fix", (mask.float() * vals))
         self.chunk = 32  # closed-form scan chunk
 
-        # torch.compile the hot pure kernels (CUDA only; eager fallback on CPU or failure).
+        # torch.compile ONLY the real kernels (the head matmul and the real pairwise einsum).
+        # Inductor does not support complex codegen and silently miscompiles the complex Toeplitz
+        # conv / pairwise (measured: ssm ppl exploded to ~10^8 on Kaggle), so the complex scan
+        # stays eager. CUDA only; eager fallback on CPU or any compile failure.
         use_compile = compile and torch.cuda.is_available()
-        self._convfn = _qconv_einsum
         self._pairfn = _qpairs_einsum
         self._headfn = _head_mm
         if use_compile:
             try:
-                self._convfn = torch.compile(_qconv_einsum, dynamic=True)
                 self._pairfn = torch.compile(_qpairs_einsum, dynamic=True)
                 self._headfn = torch.compile(_head_mm, dynamic=True)
                 # warm up once so any compile failure is caught here, not mid-training
-                dev = "cuda"
-                x = torch.randn(2, 4, 4, device=dev)
-                t = torch.randn(2, 2, 8, 8, dtype=torch.complex64, device=dev)
-                self._convfn(t, torch.randn(1, 2, 2, 8, device=dev))
-                self._pairfn(torch.randn(1, 2, 4, device=dev))
-                self._headfn(x, torch.randn(3, 4, device=dev))
+                r = torch.randn(1, 2, 4, device="cuda")
+                self._pairfn(r, r)
+                self._headfn(torch.randn(2, 4, device="cuda"), torch.randn(3, 4, device="cuda"))
             except Exception:
-                self._convfn = _qconv_einsum
                 self._pairfn = _qpairs_einsum
                 self._headfn = _head_mm
 
@@ -236,7 +232,7 @@ class QState(nn.Module):
         forward: Σ_{i≤j} P[j-i]·r[m, i]; backward: Σ_{t≥s} P[t-s]·r[m, t] (adjoint r-gradient)."""
         T = self._toeplitz(adj, backward)  # (nch, nb, 2C, 2C)
         r̃ = r.permute(0, 2, 3, 1, 4).reshape(r.shape[0], self.nch, self.nb, 2 * self.chunk)
-        out = self._convfn(T, r̃)  # (M, nch, nb, 2C)
+        out = torch.einsum("cblk,mcbk->mcbl", T, r̃)  # (M, nch, nb, 2C)
         return out.reshape(r.shape[0], self.nch, self.nb, self.chunk, 2).permute(0, 3, 1, 2, 4)
 
     def _powers(self, n: int) -> torch.Tensor:
@@ -346,7 +342,7 @@ class QState(nn.Module):
         base = torch.cat([hw0.real, hw0.imag, hw0.abs() ** 2], dim=-1)  # (w, nch, 3·dim)
         if p > 0:
             sub = hw0[:, :, :p]
-            f_pairs = self._pairfn(sub).reshape(w, self.nch, -1)
+            f_pairs = self._pairfn(sub.real, sub.imag).reshape(w, self.nch, -1)
             full = torch.cat([base, f_pairs], dim=-1)  # (w, nch, fdim_c)
         else:
             full = base

@@ -35,7 +35,7 @@ QSTATE_LEARN_R = True  # train the QState qubit angles (θ, φ) so R adapts to t
 QSTATE_SCALES = ()  # single QState decay; multi-scale would be (0.5, 0.9, 0.99)
 QSTATE_TAPS = 3  # readout taps: concat [Re, Im] of the last K state rows (recent-token decode)
 QSTATE_HIDDEN = 1024  # >0: frozen sparse random-feature (ELM) map on the QState features before the head
-QSTATE_COMPILE = True  # torch.compile the QState hot kernels (CUDA only; eager fallback)
+QSTATE_COMPILE = False  # torch.compile the REAL QState kernels (complex conv stays eager; inductor miscompiles complex)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
