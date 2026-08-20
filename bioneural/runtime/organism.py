@@ -89,6 +89,7 @@ class BioNeural(nn.Module):
                 pairs=cfg.embssm_qpairs,
                 learn=cfg.embssm_qlearn,
                 seed=cfg.seed,
+                decays=tuple(cfg.embssm_qdecays),
             )
         else:
             self.embssm = EmbSSM(

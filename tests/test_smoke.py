@@ -161,7 +161,7 @@ def test_qstate_learned_R_gradient():
         R[:, 1, 1] = c
         return R
 
-    r = (e.float() @ q.W_in.detach().t()).to(torch.complex64).reshape(w, nb, 2)
+    r = (e.float() @ q.W_in.detach()[0].t()).to(torch.complex64).reshape(w, nb, 2)
     R = build_R(theta, phi)
     carry = torch.zeros(nb, 2, dtype=torch.complex64)
     h_list = []
@@ -205,3 +205,75 @@ def test_qstate_learned_R_organism():
     ).abs().max().item() > 1e-6
     assert moved, "learned R angles did not move"
     assert ev["acc"] > 0.4, f"learned R broke 2nd-order learning: acc={ev['acc']}"
+
+
+def test_qstate_multiscale_gradient():
+    """Multi-scale QState (nch=3 channels) must match a step-by-step brute-force recurrence on
+    both the forward scan and the qubit-angle gradient, per channel."""
+    import torch
+
+    from bioneural.cortex.qstate import QState
+
+    torch.manual_seed(0)
+    dim, emb, nb, w = 16, 8, 8, 96
+    decays = (0.5, 0.9, 0.99)
+    q = QState(
+        dim=dim,
+        emb_dim=emb,
+        vocab_size=8,
+        lr=0.1,
+        head_lr=0.05,
+        decay=0.9,
+        pairs=8,
+        seed=0,
+        learn=True,
+        decays=decays,
+    )
+    nch = len(decays)
+    e = torch.randn(w, emb)
+
+    def build_R(th, ph):
+        c = torch.cos(th)
+        s = torch.sin(th)
+        ep = torch.exp(1j * ph)
+        R = torch.zeros(nb, 2, 2, dtype=torch.complex64)
+        R[:, 0, 0] = c
+        R[:, 0, 1] = s * ep
+        R[:, 1, 0] = -s * torch.conj(ep)
+        R[:, 1, 1] = c
+        return R
+
+    theta = q.theta.detach().clone().requires_grad_(True)
+    phi = q.phi.detach().clone().requires_grad_(True)
+
+    refs = []
+    h_full = []
+    for c in range(nch):
+        R = build_R(theta[c], phi[c])
+        r = (e.float() @ q.W_in.detach()[c].t()).to(torch.complex64).reshape(w, nb, 2)
+        carry = torch.zeros(nb, 2, dtype=torch.complex64)
+        h_list = []
+        for t in range(w):
+            carry = decays[c] * torch.einsum("bij,bj->bi", R, carry) + r[t]
+            h_list.append(carry)
+        h_ag = torch.stack(h_list)
+        h_full.append(h_ag.reshape(w, dim))
+        target = torch.randn(w, nb, 2, dtype=torch.complex64)
+        L = (torch.conj(target) * h_ag).real.sum()
+        L.backward(retain_graph=True)
+        refs.append((theta.grad[c].clone(), phi.grad[c].clone(), target.reshape(w, dim)))
+
+    hf = q.scan_window(e)[1].reshape(w, nch, dim)
+    for c in range(nch):
+        err = (hf[:, c] - h_full[c]).abs().max().item()
+        assert err < 1e-3, f"multiscale channel {c} forward err {err}"
+
+    theta0 = q.theta.data.clone()
+    phi0 = q.phi.data.clone()
+    q.apply_grad_ctx([t[2] for t in refs], e, mod=1.0)
+    dth = (theta0 - q.theta.data) / q.lr + q.wd * theta0
+    dph = (phi0 - q.phi.data) / q.lr + q.wd * phi0
+    for c in range(nch):
+        gth_ref, gph_ref, _ = refs[c]
+        assert (dth[c] * w - gth_ref).abs().max().item() < 1e-2, f"multiscale theta grad ch {c}"
+        assert (dph[c] * w - gph_ref).abs().max().item() < 1e-2, f"multiscale phi grad ch {c}"

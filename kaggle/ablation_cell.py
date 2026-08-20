@@ -33,6 +33,7 @@ EMBSSM_DECAYS = (0.5, 0.9, 0.99)  # multi-scale state channels (short/mid/long);
 QSTATE = False    # swap the linear EmbSSM for the quantum-inspired complex QState channel (sign-fixed)
 QSTATE_PAIRS = 16  # QState entanglement features (pairwise Re(h_i conj(h_j)) on the first N amplitudes)
 QSTATE_LEARN_R = False  # train the QState qubit angles (θ, φ) so R adapts to the task (verified vs autograd)
+QSTATE_SCALES = (0.5, 0.9, 0.99)  # multi-scale QState decay channels (short/mid/long); () = single QSTATE decay
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -91,6 +92,7 @@ cfg.embssm_decays = EMBSSM_DECAYS
 cfg.embssm_qstate = QSTATE
 cfg.embssm_qpairs = QSTATE_PAIRS
 cfg.embssm_qlearn = QSTATE_LEARN_R
+cfg.embssm_qdecays = QSTATE_SCALES
 if QSTATE:
     cfg.embssm_qdim = cfg.cortex.readout_dim // 2
 org = BioNeural(cfg)
