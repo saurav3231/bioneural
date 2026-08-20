@@ -90,6 +90,7 @@ class BioNeural(nn.Module):
                 learn=cfg.embssm_qlearn,
                 seed=cfg.seed,
                 decays=tuple(cfg.embssm_qdecays),
+                slim=cfg.embssm_qslim,
             )
         else:
             self.embssm = EmbSSM(

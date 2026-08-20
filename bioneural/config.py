@@ -125,6 +125,7 @@ class BioNeuralConfig:
     embssm_qdecay: float = 0.9  # QState leakage a (h_t = a·R·h_{t-1} + W_in·emb[x_t])
     embssm_qlearn: bool = False  # train the QState qubit angles (θ, φ) so R adapts to the task
     embssm_qdecays: tuple[float, ...] = ()  # multi-scale QState: leakage decay per channel (() = single embssm_qdecay)
+    embssm_qslim: bool = False  # multiscale QState: extra channels contribute only [Re, Im] (keep the head small; mid channel keeps full features)
     profile: bool = False  # per-phase wall-clock breakdown in the windowed training path
 
     quant: QuantConfig = field(default_factory=QuantConfig)

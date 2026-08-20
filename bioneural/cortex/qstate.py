@@ -53,6 +53,7 @@ class QState(nn.Module):
         seed: int = 0,
         learn: bool = False,
         decays: tuple[float, ...] = (),
+        slim: bool = False,
     ):
         super().__init__()
         assert dim % 2 == 0, "QState dim must be even (pairs of qubits)"
@@ -66,9 +67,20 @@ class QState(nn.Module):
         self.wd = 1e-4
         self.learn = learn
         self.pairs = min(pairs, dim)
-        # feature layout, per channel c: [Re(h_c); Im(h_c); |h_c|^2; Re(h_i·conj(h_j)) i,j<pairs]
-        self.fdim_c = 3 * dim + self.pairs * self.pairs
-        self.fdim = self.nch * self.fdim_c
+        self.slim = slim
+        # Feature layout. The MID-decay channel (closest to 0.9, the SDC/SDC-key carrier) keeps
+        # the full feature set [Re(h); Im(h); |h|^2; pairwise Re(h_i·conj(h_j)) i,j<pairs].
+        # When slim=True the OTHER channels contribute only [Re(h); Im(h)] (2·dim) so stacking
+        # timescales does not triple the head: fdim = (nch-1)·2·dim + (3·dim + pairs²) instead of
+        # nch·(3·dim + pairs²). Redundant near-identity channels otherwise dilute W_vocab and the
+        # full mix collapses back onto the embedding anchor (measured: fdim 1920 -> full 104 ppl
+        # vs 85 single-channel).
+        self.mid = min(range(self.nch), key=lambda c: abs(self.decays[c] - 0.9))
+        self.fdim_c = 3 * dim + self.pairs * self.pairs  # full feature block (mid channel)
+        if slim:
+            self.fdim = (self.nch - 1) * 2 * dim + self.fdim_c
+        else:
+            self.fdim = self.nch * self.fdim_c
 
         # block-diagonal complex unitary R per channel: dim/2 independent 2x2 qubit rotations.
         # The angles (θ, φ) are trainable when learn=True, so R adapts to the task.
@@ -245,9 +257,9 @@ class QState(nn.Module):
         return self._unit(hf), hf
 
     def features(self, h_n: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Map the (complex) normalized state to real head features: per channel Re/Im
-        amplitudes, |h|^2 measurement probabilities, and pairwise entanglement features
-        Re(h_i·conj(h_j)) on the first `pairs` amplitudes."""
+        """Map the (complex) normalized state to real head features. The mid-decay channel
+        contributes [Re, Im, |h|^2, pairwise]; when slim=True the other channels contribute only
+        [Re, Im] (their time-scale phase info) so the head stays small."""
         w = h_n.shape[0]
         hw = h_n.reshape(w, self.nch, self.dim)
         base = torch.cat([hw.real, hw.imag, hw.abs() ** 2], dim=-1)  # (w, nch, 3·dim)
@@ -257,10 +269,17 @@ class QState(nn.Module):
             f_pairs = torch.einsum("wci,wcj->wcij", sub, sub.conj()).real.reshape(
                 w, self.nch, -1
             )
-            f = torch.cat([base, f_pairs], dim=-1)  # (w, nch, fdim_c)
+            full = torch.cat([base, f_pairs], dim=-1)  # (w, nch, fdim_c)
         else:
-            f = base
-        return f.reshape(w, self.nch * self.fdim_c), None
+            full = base
+        if not self.slim:
+            return full.reshape(w, self.nch * self.fdim_c), None
+        slim_part = torch.cat([hw.real, hw.imag], dim=-1)  # (w, nch, 2·dim)
+        out = torch.cat(
+            [slim_part[:, c] if c != self.mid else full[:, c] for c in range(self.nch)],
+            dim=-1,
+        )
+        return out, None
 
     def logits(self, h_n: torch.Tensor) -> torch.Tensor:
         feat, _ = self.features(h_n)
@@ -305,25 +324,33 @@ class QState(nn.Module):
         self.W_vocab.data.sub_(self.head_lr * mod * dW.to(self.W_vocab.dtype))
 
     def dctx_from_head(self, d_ssm: torch.Tensor, h_n: torch.Tensor) -> list[torch.Tensor]:
-        """Route the head's CE gradient back to each channel's complex state."""
+        """Route the head's CE gradient back to each channel's complex state. The mid channel
+        gets the full [Re, Im, |h|^2, pairs] routing; slim extra channels only [Re, Im]."""
         w = h_n.shape[0]
-        dF = (d_ssm.float() @ self.W_vocab.float()).reshape(w, self.nch, self.fdim_c)
         dim = self.dim
         p = self.pairs
+        dF = d_ssm.float() @ self.W_vocab.float()  # (w, fdim)
         out = []
+        offset = 0
         for c in range(self.nch):
-            dFc = dF[:, c]
-            d_re = dFc[:, :dim].clone()
-            d_im = dFc[:, dim : 2 * dim].clone()
-            d_abs = dFc[:, 2 * dim : 3 * dim]
-            if p > 0:
-                dp = dFc[:, 3 * dim : 3 * dim + p * p].reshape(-1, p, p)
-                sym = dp + dp.transpose(1, 2)  # (W, p, p)
-                hn_p = h_n.reshape(w, self.nch, dim)[:, c, :p]
-                d_re[:, :p] += (sym * hn_p.real.unsqueeze(1)).sum(dim=2)
-                d_im[:, :p] += (sym * hn_p.imag.unsqueeze(1)).sum(dim=2)
-            d_hn = d_re + 2.0 * h_n.reshape(w, self.nch, dim)[:, c].real * d_abs
-            d_hn = (d_hn + 1j * (d_im + 2.0 * h_n.reshape(w, self.nch, dim)[:, c].imag * d_abs))
+            bsize = self.fdim_c if (c == self.mid or not self.slim) else 2 * dim
+            dFc = dF[:, offset : offset + bsize]
+            offset += bsize
+            hn_c = h_n.reshape(w, self.nch, dim)[:, c]
+            if c == self.mid or not self.slim:
+                d_re = dFc[:, :dim].clone()
+                d_im = dFc[:, dim : 2 * dim].clone()
+                d_abs = dFc[:, 2 * dim : 3 * dim]
+                if p > 0:
+                    dp = dFc[:, 3 * dim : 3 * dim + p * p].reshape(-1, p, p)
+                    sym = dp + dp.transpose(1, 2)  # (W, p, p)
+                    hn_p = hn_c[:, :p]
+                    d_re[:, :p] += (sym * hn_p.real.unsqueeze(1)).sum(dim=2)
+                    d_im[:, :p] += (sym * hn_p.imag.unsqueeze(1)).sum(dim=2)
+                d_hn = d_re + 2.0 * hn_c.real * d_abs
+                d_hn = d_hn + 1j * (d_im + 2.0 * hn_c.imag * d_abs)
+            else:
+                d_hn = dFc[:, :dim] + 1j * dFc[:, dim : 2 * dim]
             out.append(d_hn.to(torch.complex64))
         return out
 

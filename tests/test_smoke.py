@@ -277,3 +277,63 @@ def test_qstate_multiscale_gradient():
         gth_ref, gph_ref, _ = refs[c]
         assert (dth[c] * w - gth_ref).abs().max().item() < 1e-2, f"multiscale theta grad ch {c}"
         assert (dph[c] * w - gph_ref).abs().max().item() < 1e-2, f"multiscale phi grad ch {c}"
+
+
+def test_qstate_slim_multiscale():
+    """Slim multiscale (extra channels contribute only [Re, Im]) must keep the exact forward
+    scan, the reduced fdim, and the correct head routing for the mid channel."""
+    import torch
+
+    from bioneural.cortex.qstate import QState
+
+    torch.manual_seed(1)
+    dim, emb, w = 16, 8, 48
+    decays = (0.5, 0.9, 0.99)
+    pairs = 8
+    q = QState(
+        dim=dim,
+        emb_dim=emb,
+        vocab_size=8,
+        lr=0.1,
+        head_lr=0.05,
+        decay=0.9,
+        pairs=pairs,
+        seed=1,
+        learn=True,
+        decays=decays,
+        slim=True,
+    )
+    nch = len(decays)
+    fdim_c = 3 * dim + pairs * pairs
+    assert q.fdim == (nch - 1) * 2 * dim + fdim_c, q.fdim
+    e = torch.randn(w, emb)
+    hf = q.scan_window(e)[1].reshape(w, nch, dim)
+
+    f, _ = q.features(hf)
+    assert f.shape == (w, q.fdim), f.shape
+    mid = q.mid
+    assert mid == 1  # decay closest to 0.9
+    # mid channel block keeps full features, extras keep [Re, Im]
+    off = 0
+    for c in range(nch):
+        bsize = fdim_c if c == mid else 2 * dim
+        assert off + bsize <= q.fdim
+        off += bsize
+
+    # head gradient through the mid channel must reach the full [Re, Im, |h|^2, pairs] routing
+    d_ssm = torch.randn(w, q.W_vocab.shape[0])
+    dhs = q.dctx_from_head(d_ssm, hf)
+    assert len(dhs) == nch
+    hw = hf.reshape(w, nch, dim)
+    dF = d_ssm.float() @ q.W_vocab.float()
+    off = 0
+    for c in range(nch):
+        bsize = fdim_c if c == mid else 2 * dim
+        dFc = dF[:, off : off + bsize]
+        off += bsize
+        d_ref = dFc[:, :dim] + 1j * dFc[:, dim : 2 * dim]
+        if c == mid:
+            d_abs = dFc[:, 2 * dim : 3 * dim]
+            d_ref = d_ref + 2.0 * hw[:, c].real * d_abs
+            d_ref = d_ref + 1j * (2.0 * hw[:, c].imag * d_abs)
+        assert (dhs[c] - d_ref.to(torch.complex64)).abs().max().item() < 1e-5, c
