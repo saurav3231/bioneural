@@ -29,12 +29,10 @@ EVAL_TOK = 512
 EVAL_EVERY = 250_000
 EMBSSM = True     # train the EmbSSM readout path (continuous SSM over embeddings)
 EMBSSM_HIDDEN = 0  # 0 = linear state; >0 = frozen random-feature (ELM) map before the SSM head
-EMBSSM_DECAYS = (0.5, 0.9, 0.99)  # multi-scale state channels (short/mid/long); () = single embssm_decay
-QSTATE = False    # swap the linear EmbSSM for the quantum-inspired complex QState channel (sign-fixed)
+QSTATE = True    # swap the linear EmbSSM for the quantum-inspired complex QState channel (sign-fixed)
 QSTATE_PAIRS = 16  # QState entanglement features (pairwise Re(h_i conj(h_j)) on the first N amplitudes)
-QSTATE_LEARN_R = False  # train the QState qubit angles (θ, φ) so R adapts to the task (verified vs autograd)
-QSTATE_SCALES = (0.5, 0.9, 0.99)  # multi-scale QState decay channels (short/mid/long); () = single QSTATE decay
-QSTATE_SLIM = True  # multiscale QState: extra channels contribute only [Re, Im] (fdim stays ~1.8x, not 3x, of single-channel)
+QSTATE_LEARN_R = True  # train the QState qubit angles (θ, φ) so R adapts to the task (verified vs autograd)
+QSTATE_SCALES = ()  # single QState decay; multi-scale would be (0.5, 0.9, 0.99)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -88,21 +86,13 @@ cfg.batch_window = WINDOW
 cfg.spike_ticks = TICKS
 cfg.profile = False
 cfg.embssm_readout = EMBSSM
-cfg.embssm_hidden = EMBSSM_HIDDEN
-cfg.embssm_decays = EMBSSM_DECAYS
 cfg.embssm_qstate = QSTATE
 cfg.embssm_qpairs = QSTATE_PAIRS
 cfg.embssm_qlearn = QSTATE_LEARN_R
 cfg.embssm_qdecays = QSTATE_SCALES
-cfg.embssm_qslim = QSTATE_SLIM
 if QSTATE:
     cfg.embssm_qdim = cfg.cortex.readout_dim // 2
 org = BioNeural(cfg)
-if QSTATE:
-    print(
-        f"    QState: nch={org.embssm.nch} dim={org.embssm.dim} "
-        f"fdim={org.embssm.fdim} slim={org.embssm.slim}"
-    )
 
 budget = MINUTES * 60.0
 t0 = time.monotonic()
