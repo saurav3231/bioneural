@@ -130,6 +130,8 @@ class BioNeuralConfig:
     embssm_qhidden: int = 0  # >0: frozen sparse random-feature (ELM) map on the QState features before the head
     embssm_qcompile: bool = False  # torch.compile the QState hot kernels (CUDA only; eager fallback)
     embssm_qaux: float = 0.0  # auxiliary SSM-alone CE weight: also train W_vocab/state on the channel's OWN next-token CE (makes it a strong standalone predictor, not just a bigram fixer)
+    embssm_qgate: bool = False  # nonlinear chunk-boundary squash in the QState recurrence (breaks the linear-unitary ceiling: linear recurrences can only be bigram-level residual amplifiers, they can never be a standalone language model)
+    embssm_qrho: float = 2.0  # squash radius rho for the nonlinear gate (state magnitudes are clamped toward |h| <= rho per element, phase preserved)
     embssm_skipbio: bool = True  # embssm training windows skip the SDC/workspace/fabric memory + synaptic scaling (they are not the predictor; dropping them is a big tps win)
     profile: bool = False  # per-phase wall-clock breakdown in the windowed training path
 

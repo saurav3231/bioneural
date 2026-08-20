@@ -33,10 +33,12 @@ QSTATE = True    # swap the linear EmbSSM for the quantum-inspired complex QStat
 QSTATE_PAIRS = 16  # QState entanglement features (pairwise Re(h_i conj(h_j)) on the first N amplitudes)
 QSTATE_LEARN_R = True  # train the QState qubit angles (θ, φ) so R adapts to the task (verified vs autograd)
 QSTATE_SCALES = ()  # single QState decay; multi-scale would be (0.5, 0.9, 0.99)
-QSTATE_TAPS = 3  # readout taps: concat [Re, Im] of the last K state rows (recent-token decode)
-QSTATE_HIDDEN = 1024  # >0: frozen sparse random-feature (ELM) map on the QState features before the head
+QSTATE_TAPS = 1  # multi-tap readout measured a regression (90 vs 85); keep 1
+QSTATE_HIDDEN = 0  # ELM also regressed (94 vs 85); 0 = linear head
 QSTATE_COMPILE = True  # torch.compile the REAL QState kernels (complex conv stays eager; safe now)
-QSTATE_AUX = 1.0  # auxiliary SSM-alone CE weight: train the channel's OWN next-token CE so it becomes a strong predictor, not just a bigram fixer (0 = off)
+QSTATE_AUX = 0.0  # aux SSM-alone CE backfired (105 vs 90): its standalone gradient is noise while ssm-alone is ~430
+QSTATE_GATE = True  # nonlinear chunk-boundary squash in the recurrence: breaks the linear-unitary ceiling (a linear recurrence can only be a bigram fixer, never a standalone model)
+QSTATE_RHO = 2.0  # squash radius for the gate (state magnitudes clamp toward |h|<=rho, phase preserved)
 SKIP_BIO = True  # drop the SDC/workspace/fabric memory + synaptic scaling from embssm windows (not the predictor; big tps win)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -89,7 +91,7 @@ cfg.device = "cuda"
 cfg.vocab_size = cfg_vocab
 cfg.batch_window = WINDOW
 cfg.spike_ticks = TICKS
-cfg.profile = False
+cfg.profile = True   # prints the per-window timing breakdown (find the real tps bottleneck)
 cfg.embssm_readout = EMBSSM
 cfg.embssm_qstate = QSTATE
 cfg.embssm_qpairs = QSTATE_PAIRS
@@ -100,6 +102,8 @@ cfg.embssm_qhidden = QSTATE_HIDDEN
 cfg.embssm_qcompile = QSTATE_COMPILE
 cfg.embssm_qaux = QSTATE_AUX
 cfg.embssm_skipbio = SKIP_BIO
+cfg.embssm_qgate = QSTATE_GATE
+cfg.embssm_qrho = QSTATE_RHO
 if QSTATE:
     cfg.embssm_qdim = cfg.cortex.readout_dim // 2
 org = BioNeural(cfg)

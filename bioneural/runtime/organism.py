@@ -94,6 +94,8 @@ class BioNeural(nn.Module):
                 taps=cfg.embssm_qtaps,
                 hidden=cfg.embssm_qhidden,
                 compile=cfg.embssm_qcompile,
+                gate=cfg.embssm_qgate,
+                rho=cfg.embssm_qrho,
             )
         else:
             self.embssm = EmbSSM(

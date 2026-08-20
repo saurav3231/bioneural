@@ -80,6 +80,8 @@ class QState(nn.Module):
         taps: int = 1,
         hidden: int = 0,
         compile: bool = False,
+        gate: bool = False,
+        rho: float = 2.0,
     ):
         super().__init__()
         assert dim % 2 == 0, "QState dim must be even (pairs of qubits)"
@@ -96,6 +98,8 @@ class QState(nn.Module):
         self.slim = slim
         self.taps = max(1, taps)
         self.hidden = hidden
+        self.gate = gate
+        self.rho = rho
         # Feature layout. The MID-decay channel (closest to 0.9, the SDC/SDC-key carrier) keeps
         # the full feature set [Re(h); Im(h); |h|^2; pairwise Re(h_i·conj(h_j)) i,j<pairs].
         # When slim=True the OTHER channels contribute only [Re(h); Im(h)] (2·dim) so stacking
@@ -289,6 +293,22 @@ class QState(nn.Module):
         return h / (h.abs() + 1e-8)
 
     # ------------------------------------------------------------------
+    def _squash(self, x: torch.Tensor) -> torch.Tensor:
+        """Elementwise complex soft-saturation: x -> x / (1 + |x|/rho). Phase preserved,
+        magnitude clamped toward rho. This is the nonlinearity that breaks the linear-unitary
+        ceiling: a purely linear recurrence can only be a bigram-level residual amplifier
+        (measured: ssm-alone ppl 430-750 no matter the readout), while a gate lets the state
+        actually re-weight its own history like an RNN gate. Applied at chunk boundaries so the
+        Toeplitz scan inside each chunk stays parallel."""
+        s = x.abs() / self.rho  # |x| per real pair
+        return x / (1.0 + s)
+
+    def _squash_grad(self, x: torch.Tensor, acc: torch.Tensor) -> torch.Tensor:
+        """d/dx of the per-element squash x_i -> x_i/(1+|x_i|/rho). Each element is squashed
+        independently, so the Jacobian is DIAGONAL: dy_i/dx_i = 1/(1+|x_i|/rho)^2."""
+        s = x.abs() / self.rho
+        return acc / ((1.0 + s) ** 2)
+
     def scan_window(self, e: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Closed-form complex forward scan over a window of embeddings, CHUNKED. Returns the
         L2-normalized complex state (W, nch·dim), the raw state (W, nch·dim); advances the
@@ -308,13 +328,16 @@ class QState(nn.Module):
         r = r.reshape(M, C, self.nch, nb, 2)
         h = self._conv(r)  # internal convolution, (M, C, nch, nb, 2)
         P = self._powers(C + 1)  # (nch, C+1, nb, 2, 2); carry uses [1:]
-        carry = self.h.reshape(self.nch, nb, 2).clone()  # (nch, nb, 2)
+        carry = self.h.reshape(self.nch, self.nb, 2).clone()  # (nch, nb, 2)
         carry0 = carry
         for m in range(M):
             h[m] += torch.einsum("cjbik,cbk->cjbi", P[:, 1:], carry).permute(1, 0, 2, 3)
             carry = h[m, C - 1]
+            if self.gate:
+                carry = self._squash(carry)  # nonlinear mixing between chunks
         hf = h.reshape(M * C, self.nch, nb, 2)[:w].reshape(w, self.nch * self.dim)
-        self.h = hf[-1].reshape(self.nch, self.dim).detach()
+        self._hlin = h.detach()  # pre-squash chunk values, used by the gated adjoint backward
+        self.h = carry.reshape(self.nch, self.dim).detach()
         self._hprev = torch.cat(
             [carry0.reshape(1, self.nch, self.dim), hf[:-1].reshape(w - 1, self.nch, self.dim)],
             dim=0,
@@ -393,6 +416,8 @@ class QState(nn.Module):
         carry = self.h.reshape(self.nch, self.nb, 2).clone()
         a = torch.tensor(self.decays, device=e.device)[:, None]
         nxt = a * torch.einsum("cbij,cbj->cbi", R, carry).reshape(self.nch, self.dim) + r
+        if self.gate:
+            nxt = self._squash(nxt.reshape(self.nch, self.nb, 2)).reshape(self.nch, self.dim)
         self.h = nxt.detach()
         hn = self._unit(nxt)
         if self.taps > 1:
@@ -501,12 +526,17 @@ class QState(nn.Module):
         Padj = self._powers_adj(C + 1)
         c_term = torch.einsum("mjcbi,cjbki->mcbk", dj, Padj[:, 1:])  # (M, nch, nb, 2)
         acc = torch.zeros(self.nch, nb, 2, dtype=torch.complex64, device=d.device)
+        hlin = getattr(self, "_hlin", None)
         for m in reversed(range(M)):
             tail = torch.einsum("cjbik,cbk->cjbi", torch.flip(Padj[:, :C], dims=[1]), acc)
             G[m] += tail.permute(1, 0, 2, 3)
             acc = c_term[m] + torch.einsum(
                 "cjbik,cbk->cjbi", Padj[:, C : C + 1], acc
             ).squeeze(1)
+            # carry into chunk m was squash(h_lin[m-1, C-1]); backprop the squash Jacobian
+            # before the gradient propagates through chunk m-1's linear map.
+            if self.gate and m > 0 and hlin is not None:
+                acc = self._squash_grad(hlin[m - 1, C - 1], acc)
         Gf = G.reshape(M * C, self.nch, nb, 2)[:w]  # (w, nch, nb, 2)
         dW = (
             torch.einsum("wcd,we->cde", Gf.reshape(w, self.nch, self.dim).real, e.float()) / w
