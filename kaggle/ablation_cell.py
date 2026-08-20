@@ -98,6 +98,11 @@ cfg.embssm_qslim = QSTATE_SLIM
 if QSTATE:
     cfg.embssm_qdim = cfg.cortex.readout_dim // 2
 org = BioNeural(cfg)
+if QSTATE:
+    print(
+        f"    QState: nch={org.embssm.nch} dim={org.embssm.dim} "
+        f"fdim={org.embssm.fdim} slim={org.embssm.slim}"
+    )
 
 budget = MINUTES * 60.0
 t0 = time.monotonic()
