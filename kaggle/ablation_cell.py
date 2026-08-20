@@ -33,6 +33,9 @@ QSTATE = True    # swap the linear EmbSSM for the quantum-inspired complex QStat
 QSTATE_PAIRS = 16  # QState entanglement features (pairwise Re(h_i conj(h_j)) on the first N amplitudes)
 QSTATE_LEARN_R = True  # train the QState qubit angles (θ, φ) so R adapts to the task (verified vs autograd)
 QSTATE_SCALES = ()  # single QState decay; multi-scale would be (0.5, 0.9, 0.99)
+QSTATE_TAPS = 3  # readout taps: concat [Re, Im] of the last K state rows (recent-token decode)
+QSTATE_HIDDEN = 1024  # >0: frozen sparse random-feature (ELM) map on the QState features before the head
+QSTATE_COMPILE = True  # torch.compile the QState hot kernels (CUDA only; eager fallback)
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -90,6 +93,9 @@ cfg.embssm_qstate = QSTATE
 cfg.embssm_qpairs = QSTATE_PAIRS
 cfg.embssm_qlearn = QSTATE_LEARN_R
 cfg.embssm_qdecays = QSTATE_SCALES
+cfg.embssm_qtaps = QSTATE_TAPS
+cfg.embssm_qhidden = QSTATE_HIDDEN
+cfg.embssm_qcompile = QSTATE_COMPILE
 if QSTATE:
     cfg.embssm_qdim = cfg.cortex.readout_dim // 2
 org = BioNeural(cfg)

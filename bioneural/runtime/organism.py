@@ -91,6 +91,9 @@ class BioNeural(nn.Module):
                 seed=cfg.seed,
                 decays=tuple(cfg.embssm_qdecays),
                 slim=cfg.embssm_qslim,
+                taps=cfg.embssm_qtaps,
+                hidden=cfg.embssm_qhidden,
+                compile=cfg.embssm_qcompile,
             )
         else:
             self.embssm = EmbSSM(

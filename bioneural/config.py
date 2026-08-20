@@ -126,6 +126,9 @@ class BioNeuralConfig:
     embssm_qlearn: bool = False  # train the QState qubit angles (θ, φ) so R adapts to the task
     embssm_qdecays: tuple[float, ...] = ()  # multi-scale QState: leakage decay per channel (() = single embssm_qdecay)
     embssm_qslim: bool = False  # multiscale QState: extra channels contribute only [Re, Im] (keep the head small; mid channel keeps full features)
+    embssm_qtaps: int = 1  # QState readout taps: concat [Re, Im] of the last K state rows (recent-token decode)
+    embssm_qhidden: int = 0  # >0: frozen sparse random-feature (ELM) map on the QState features before the head
+    embssm_qcompile: bool = False  # torch.compile the QState hot kernels (CUDA only; eager fallback)
     profile: bool = False  # per-phase wall-clock breakdown in the windowed training path
 
     quant: QuantConfig = field(default_factory=QuantConfig)

@@ -23,6 +23,15 @@ amplitudes) and (ii) pairwise "entanglement" features Re(h_i · conj(h_j)) on th
 `pairs` amplitudes — a quadratic feature space that can linearly separate conjunctions a
 linear map cannot.
 
+Readout: the last state row alone is a ROTATED, DECAYED SUM of recent embeddings, which a
+linear head must deconvolve to recover "which token came when". With taps>1 the head reads
+the last K state rows (h_t .. h_{t-K+1}) as a sliding window, so recent tokens decode
+directly per-tap (the current tap keeps the full feature set; past taps contribute only
+[Re, Im], fdim grows by 2·dim per extra tap). With hidden>0 the feature vector passes a
+frozen sparse random-feature (ELM) map relu(feat·W_fix) before the linear head — nonlinear
+decoding capacity at zero training cost. Both levers are measured to move the full mix off
+the bigram floor (the plain residual amplifier plateaus ~85-88 ppl).
+
 Training is exact closed-form (complex forward scan + complex adjoint backward scan, no
 autograd), matching the EmbSSM module interface so it can be swapped in as
 `organism.embssm` when `cfg.embssm_qstate` is set. The mixed head is CE-trained on the
@@ -31,13 +40,28 @@ combined logits exactly like EmbSSM, so an uninformative state drives β -> 0 / 
 
 The cross-lag convolutions are block-Toeplitz matrix products (cached, rebuilt only when the
 learned angles change), so each scan is one batched matmul + an M-step carry chain instead of
-a C-lag einsum loop.
+a C-lag einsum loop. With compile=True the hot kernels (Toeplitz conv, pairwise einsum, head
+matmul) are torch.compile'd (CUDA only; falls back to eager on CPU or any compile failure).
 """
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+
+
+def _qconv_einsum(T: torch.Tensor, rtilde: torch.Tensor) -> torch.Tensor:
+    """Batched block-Toeplitz convolution: (nch, nb, 2C, 2C) x (M, nch, nb, 2C)."""
+    return torch.einsum("cblk,mcbk->mcbl", T, rtilde)
+
+
+def _qpairs_einsum(sub: torch.Tensor) -> torch.Tensor:
+    """Pairwise entanglement features Re(h_i·conj(h_j)) on (w, nch, p) amplitudes."""
+    return torch.einsum("wci,wcj->wcij", sub, sub.conj()).real
+
+
+def _head_mm(feat: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+    return feat @ W.t()
 
 
 class QState(nn.Module):
@@ -54,6 +78,9 @@ class QState(nn.Module):
         learn: bool = False,
         decays: tuple[float, ...] = (),
         slim: bool = False,
+        taps: int = 1,
+        hidden: int = 0,
+        compile: bool = False,
     ):
         super().__init__()
         assert dim % 2 == 0, "QState dim must be even (pairs of qubits)"
@@ -68,6 +95,8 @@ class QState(nn.Module):
         self.learn = learn
         self.pairs = min(pairs, dim)
         self.slim = slim
+        self.taps = max(1, taps)
+        self.hidden = hidden
         # Feature layout. The MID-decay channel (closest to 0.9, the SDC/SDC-key carrier) keeps
         # the full feature set [Re(h); Im(h); |h|^2; pairwise Re(h_i·conj(h_j)) i,j<pairs].
         # When slim=True the OTHER channels contribute only [Re(h); Im(h)] (2·dim) so stacking
@@ -78,9 +107,12 @@ class QState(nn.Module):
         self.mid = min(range(self.nch), key=lambda c: abs(self.decays[c] - 0.9))
         self.fdim_c = 3 * dim + self.pairs * self.pairs  # full feature block (mid channel)
         if slim:
-            self.fdim = (self.nch - 1) * 2 * dim + self.fdim_c
+            self.fdim0 = (self.nch - 1) * 2 * dim + self.fdim_c
         else:
-            self.fdim = self.nch * self.fdim_c
+            self.fdim0 = self.nch * self.fdim_c
+        # Multi-tap readout: the current tap keeps the full base layout; each past tap appends
+        # the mid channel's [Re, Im] (2·dim) — a direct, per-tap decode of recent tokens.
+        self.fdim = self.fdim0 + (self.taps - 1) * 2 * dim
 
         # block-diagonal complex unitary R per channel: dim/2 independent 2x2 qubit rotations.
         # The angles (θ, φ) are trainable when learn=True, so R adapts to the task.
@@ -104,11 +136,44 @@ class QState(nn.Module):
         )
         # W_vocab starts at ZERO (neutral channel -> β's gradient starts at zero, no cold-start
         # collapse); learns from the bigram's residual before β grows to amplify it.
-        self.W_vocab = nn.Parameter(torch.zeros(vocab_size, self.fdim))
+        d_head = self.fdim if hidden == 0 else hidden
+        self.W_vocab = nn.Parameter(torch.zeros(vocab_size, d_head))
         self.beta = nn.Parameter(torch.tensor(1.0))
         self.register_buffer("h", torch.zeros(self.nch, dim, dtype=torch.complex64))
         self.register_buffer("_hprev", torch.zeros(self.nch, 0, dim, dtype=torch.complex64))
+        self.register_buffer(
+            "_taphist",
+            torch.zeros(max(0, self.taps - 1), self.nch, dim, dtype=torch.complex64),
+        )
+        # Frozen sparse random-feature (ELM) map before the head: nonlinear decode capacity
+        # with zero training cost (same trick as the linear EmbSSM's `hidden` option).
+        if hidden > 0:
+            mask = torch.rand(hidden, self.fdim, generator=g) < 0.15
+            vals = torch.where(torch.rand(hidden, self.fdim, generator=g) < 0.5, 1.0, -1.0)
+            self.register_buffer("W_fix", (mask.float() * vals))
         self.chunk = 32  # closed-form scan chunk
+
+        # torch.compile the hot pure kernels (CUDA only; eager fallback on CPU or failure).
+        use_compile = compile and torch.cuda.is_available()
+        self._convfn = _qconv_einsum
+        self._pairfn = _qpairs_einsum
+        self._headfn = _head_mm
+        if use_compile:
+            try:
+                self._convfn = torch.compile(_qconv_einsum, dynamic=True)
+                self._pairfn = torch.compile(_qpairs_einsum, dynamic=True)
+                self._headfn = torch.compile(_head_mm, dynamic=True)
+                # warm up once so any compile failure is caught here, not mid-training
+                dev = "cuda"
+                x = torch.randn(2, 4, 4, device=dev)
+                t = torch.randn(2, 2, 8, 8, dtype=torch.complex64, device=dev)
+                self._convfn(t, torch.randn(1, 2, 2, 8, device=dev))
+                self._pairfn(torch.randn(1, 2, 4, device=dev))
+                self._headfn(x, torch.randn(3, 4, device=dev))
+            except Exception:
+                self._convfn = _qconv_einsum
+                self._pairfn = _qpairs_einsum
+                self._headfn = _head_mm
 
     def _build_R(self) -> torch.Tensor:
         """Block-diagonal R (nch, nb, 2, 2): [[cosθ, sinθ·e^{iφ}], [-sinθ·e^{-iφ}, cosθ]]."""
@@ -171,7 +236,7 @@ class QState(nn.Module):
         forward: Σ_{i≤j} P[j-i]·r[m, i]; backward: Σ_{t≥s} P[t-s]·r[m, t] (adjoint r-gradient)."""
         T = self._toeplitz(adj, backward)  # (nch, nb, 2C, 2C)
         r̃ = r.permute(0, 2, 3, 1, 4).reshape(r.shape[0], self.nch, self.nb, 2 * self.chunk)
-        out = torch.einsum("cblk,mcbk->mcbl", T, r̃)  # (M, nch, nb, 2C)
+        out = self._convfn(T, r̃)  # (M, nch, nb, 2C)
         return out.reshape(r.shape[0], self.nch, self.nb, self.chunk, 2).permute(0, 3, 1, 2, 4)
 
     def _powers(self, n: int) -> torch.Tensor:
@@ -235,8 +300,8 @@ class QState(nn.Module):
         if self.learn:
             self._refresh_R()
         r = torch.einsum("wd,cdk->wck", e.float(), self.W_in.transpose(1, 2)).to(
-        torch.complex64
-    )  # (w, nch, dim)
+            torch.complex64
+        )  # (w, nch, dim)
         r = r.reshape(w, self.nch, nb, 2)
         if M * C != w:
             r = torch.nn.functional.pad(r, (0, 0, 0, 0, 0, 0, M * C - w, 0))
@@ -256,34 +321,68 @@ class QState(nn.Module):
         ).detach()
         return self._unit(hf), hf
 
-    def features(self, h_n: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Map the (complex) normalized state to real head features. The mid-decay channel
-        contributes [Re, Im, |h|^2, pairwise]; when slim=True the other channels contribute only
-        [Re, Im] (their time-scale phase info) so the head stays small."""
+    def _tap_stack(self, h_n: torch.Tensor) -> torch.Tensor:
+        """Sliding readout window of normalized states (w, taps, nch, dim). Tap k at position t
+        is the state h_{t-k} (zero for t-k < 0, i.e. the first k-1 window positions). The
+        single-row case (generation) reads the rolling `_taphist` buffer."""
         w = h_n.shape[0]
         hw = h_n.reshape(w, self.nch, self.dim)
-        base = torch.cat([hw.real, hw.imag, hw.abs() ** 2], dim=-1)  # (w, nch, 3·dim)
+        if w == 1:
+            past = self._taphist[: self.taps - 1].flip(0).unsqueeze(0)
+            return torch.cat([hw.unsqueeze(1), past], dim=1)
+        padded = torch.cat(
+            [torch.zeros(self.taps - 1, self.nch, self.dim, dtype=hw.dtype, device=hw.device), hw],
+            dim=0,
+        )
+        idx = torch.arange(w, device=hw.device)[:, None] + (
+            self.taps - 1 - torch.arange(self.taps, device=hw.device)
+        )[None, :]
+        return padded[idx]
+
+    def _base_block(self, hw0: torch.Tensor) -> torch.Tensor:
+        """(w, nch, dim) complex normalized tap-0 states -> (w, fdim0) base feature block."""
+        w = hw0.shape[0]
         p = self.pairs
+        base = torch.cat([hw0.real, hw0.imag, hw0.abs() ** 2], dim=-1)  # (w, nch, 3·dim)
         if p > 0:
-            sub = hw[:, :, :p]
-            f_pairs = torch.einsum("wci,wcj->wcij", sub, sub.conj()).real.reshape(
-                w, self.nch, -1
-            )
+            sub = hw0[:, :, :p]
+            f_pairs = self._pairfn(sub).reshape(w, self.nch, -1)
             full = torch.cat([base, f_pairs], dim=-1)  # (w, nch, fdim_c)
         else:
             full = base
         if not self.slim:
-            return full.reshape(w, self.nch * self.fdim_c), None
-        slim_part = torch.cat([hw.real, hw.imag], dim=-1)  # (w, nch, 2·dim)
-        out = torch.cat(
+            return full.reshape(w, self.nch * self.fdim_c)
+        slim_part = torch.cat([hw0.real, hw0.imag], dim=-1)  # (w, nch, 2·dim)
+        return torch.cat(
             [slim_part[:, c] if c != self.mid else full[:, c] for c in range(self.nch)],
             dim=-1,
         )
-        return out, None
+
+    def _features_stack(self, stack: torch.Tensor) -> torch.Tensor:
+        """Tap-0 base features + [Re, Im] of the mid channel at each past tap."""
+        w = stack.shape[0]
+        base = self._base_block(stack[:, 0])
+        if self.taps <= 1:
+            return base
+        hm = stack[:, 1:, self.mid]  # (w, taps-1, dim)
+        past = torch.cat([hm.real, hm.imag], dim=-1).reshape(w, (self.taps - 1) * 2 * self.dim)
+        return torch.cat([base, past], dim=-1)
+
+    def features(self, h_n: torch.Tensor) -> tuple[torch.Tensor, None]:
+        """Map the (complex) normalized state window to real head features."""
+        return self._features_stack(self._tap_stack(h_n)), None
+
+    def _feat_act(self, feat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Optional frozen ELM projection; returns (activation, pre-activation)."""
+        if self.hidden > 0:
+            pre = self._headfn(feat, self.W_fix)
+            return torch.relu(pre), pre
+        return feat, None
 
     def logits(self, h_n: torch.Tensor) -> torch.Tensor:
-        feat, _ = self.features(h_n)
-        return feat.to(torch.float16) @ self.W_vocab.to(torch.float16).t()
+        feat = self.features(h_n)[0]
+        act, _ = self._feat_act(feat)
+        return self._headfn(act.to(torch.float16), self.W_vocab.to(torch.float16))
 
     def forward(self, e: torch.Tensor) -> torch.Tensor:
         """Single-token step (generation / per-token path). Returns the SSM logits (vocab,)."""
@@ -295,8 +394,18 @@ class QState(nn.Module):
         a = torch.tensor(self.decays, device=e.device)[:, None]
         nxt = a * torch.einsum("cbij,cbj->cbi", R, carry).reshape(self.nch, self.dim) + r
         self.h = nxt.detach()
-        hn = self._unit(nxt.unsqueeze(0)).reshape(1, self.nch * self.dim)
-        return self.logits(hn)[0]
+        hn = self._unit(nxt)
+        if self.taps > 1:
+            past = self._taphist.flip(0).unsqueeze(0)  # h_{t-1} .. h_{t-(taps-1)} (pre-push)
+            stack = torch.cat([hn.reshape(1, 1, self.nch, self.dim), past], dim=1)
+            self._taphist = torch.cat(
+                [self._taphist[1:], hn.detach().reshape(1, self.nch, self.dim)], dim=0
+            )
+        else:
+            stack = hn.reshape(1, 1, self.nch, self.dim)
+        feat = self._features_stack(stack)
+        act, _ = self._feat_act(feat)
+        return self._headfn(act.to(torch.float16), self.W_vocab.to(torch.float16))[0]
 
     def sdch(self, h: torch.Tensor) -> torch.Tensor:
         """The memory/SDC key: concat(Re, Im) of the MID-decay channel's complex state ->
@@ -318,18 +427,27 @@ class QState(nn.Module):
     # ------------------------------------------------------------------
     def train_head(self, d_logits: torch.Tensor, h_n: torch.Tensor, mod: float = 1.0) -> None:
         """Update W_vocab by gradient DESCENT on the CE (d_logits = β·(p − onehot))."""
-        feat, _ = self.features(h_n)
-        w = feat.shape[0]
-        dW = (d_logits.float().t() @ feat) / w
+        feat = self.features(h_n)[0]
+        act, _ = self._feat_act(feat)
+        w = act.shape[0]
+        dW = (d_logits.float().t() @ act) / w
         self.W_vocab.data.sub_(self.head_lr * mod * dW.to(self.W_vocab.dtype))
 
     def dctx_from_head(self, d_ssm: torch.Tensor, h_n: torch.Tensor) -> list[torch.Tensor]:
         """Route the head's CE gradient back to each channel's complex state. The mid channel
-        gets the full [Re, Im, |h|^2, pairs] routing; slim extra channels only [Re, Im]."""
+        gets the full [Re, Im, |h|^2, pairs] routing; slim extra channels only [Re, Im]; each
+        past tap's [Re, Im] gradient is shifted back to the state it was read from."""
         w = h_n.shape[0]
         dim = self.dim
         p = self.pairs
-        dF = d_ssm.float() @ self.W_vocab.float()  # (w, fdim)
+        feat = self.features(h_n)[0]
+        if self.hidden > 0:
+            pre = self._headfn(feat, self.W_fix)
+            dF = (
+                (d_ssm.float() @ self.W_vocab.float()) * (pre > 0).float()
+            ) @ self.W_fix.float()  # (w, fdim)
+        else:
+            dF = d_ssm.float() @ self.W_vocab.float()  # (w, fdim)
         out = []
         offset = 0
         for c in range(self.nch):
@@ -352,6 +470,15 @@ class QState(nn.Module):
             else:
                 d_hn = dFc[:, :dim] + 1j * dFc[:, dim : 2 * dim]
             out.append(d_hn.to(torch.complex64))
+        if self.taps > 1:
+            mid = self.mid
+            for k in range(1, self.taps):
+                off = self.fdim0 + (k - 1) * 2 * dim
+                dFk = dF[:, off : off + 2 * dim]
+                dhk = dFk[:, :dim] + 1j * dFk[:, dim : 2 * dim]  # grad w.r.t. h_{t-k}
+                shifted = torch.zeros_like(dhk)
+                shifted[: w - k] = dhk[k:]  # position p gets the gradient from tap k at t = p+k
+                out[mid] = out[mid] + shifted
         return out
 
     def train_beta(self, grad_beta: torch.Tensor, mod: float = 1.0) -> None:
@@ -416,3 +543,4 @@ class QState(nn.Module):
         self._hprev = torch.zeros(
             self.nch, 0, self.dim, dtype=torch.complex64, device=self.h.device
         )
+        self._taphist.zero_()

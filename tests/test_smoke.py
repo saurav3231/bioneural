@@ -337,3 +337,72 @@ def test_qstate_slim_multiscale():
             d_ref = d_ref + 2.0 * hw[:, c].real * d_abs
             d_ref = d_ref + 1j * (2.0 * hw[:, c].imag * d_abs)
         assert (dhs[c] - d_ref.to(torch.complex64)).abs().max().item() < 1e-5, c
+
+
+def test_qstate_taps_elm():
+    """Multi-tap readout + frozen ELM decode must match a manual reference end-to-end:
+    feature layout (past taps = [Re, Im] of the mid channel), ELM activation, and the tap
+    gradient shift-back through dctx_from_head."""
+    import torch
+
+    from bioneural.cortex.qstate import QState
+
+    torch.manual_seed(0)
+    dim, emb, w = 16, 8, 40
+    taps, hidden = 3, 16
+    q = QState(
+        dim=dim,
+        emb_dim=emb,
+        vocab_size=8,
+        lr=0.1,
+        head_lr=0.05,
+        decay=0.9,
+        pairs=8,
+        seed=0,
+        learn=False,
+        taps=taps,
+        hidden=hidden,
+    )
+    fdim_c = 3 * dim + 8 * 8
+    assert q.fdim == fdim_c + (taps - 1) * 2 * dim, q.fdim
+    assert q.W_vocab.shape == (8, hidden)
+
+    e = torch.randn(w, emb)
+    h_n, _ = q.scan_window(e)  # (w, dim) normalized, single channel
+    hw = h_n.reshape(w, 1, dim)
+    feat = q.features(h_n)[0]
+    assert feat.shape == (w, q.fdim)
+    # past-tap blocks: tap k's [Re, Im] must equal the state k positions earlier
+    for k in range(1, taps):
+        off = fdim_c + (k - 1) * 2 * dim
+        ref = torch.cat([hw[w - 1 - k].real, hw[w - 1 - k].imag], dim=-1)
+        assert (feat[w - 1, off : off + 2 * dim] - ref).abs().max().item() < 1e-6, k
+
+    # ELM: logits = relu(feat @ W_fix.t()) @ W_vocab.t()
+    act_ref = torch.relu(feat.float() @ q.W_fix.float().t())
+    lg_ref = act_ref @ q.W_vocab.float().t()
+    assert (q.logits(h_n).float() - lg_ref).abs().max().item() < 1e-3
+
+    # dctx: dF = (d_ssm @ W_vocab) * (pre>0) @ W_fix, then base routing + tap shift-back
+    d_ssm = torch.randn(w, 8)
+    pre = feat.float() @ q.W_fix.float().t()
+    dF = ((d_ssm.float() @ q.W_vocab.float()) * (pre > 0).float()) @ q.W_fix.float()
+    dhs = q.dctx_from_head(d_ssm, h_n)
+    p = q.pairs
+    d_re = dF[:, :dim].clone()
+    d_im = dF[:, dim : 2 * dim].clone()
+    d_abs = dF[:, 2 * dim : 3 * dim]
+    dp = dF[:, 3 * dim : 3 * dim + p * p].reshape(-1, p, p)
+    sym = dp + dp.transpose(1, 2)
+    hn = hw[:, 0]
+    d_re[:, :p] += (sym * hn[:, :p].real.unsqueeze(1)).sum(dim=2)
+    d_im[:, :p] += (sym * hn[:, :p].imag.unsqueeze(1)).sum(dim=2)
+    d_ref = d_re + 2.0 * hn.real * d_abs
+    d_ref = d_ref + 1j * (d_im + 2.0 * hn.imag * d_abs)
+    for k in range(1, taps):
+        off = fdim_c + (k - 1) * 2 * dim
+        dhk = dF[:, off : off + dim] + 1j * dF[:, off + dim : off + 2 * dim]
+        sh = torch.zeros_like(dhk)
+        sh[: w - k] = dhk[k:]
+        d_ref = d_ref + sh
+    assert (dhs[0] - d_ref.to(torch.complex64)).abs().max().item() < 1e-4
