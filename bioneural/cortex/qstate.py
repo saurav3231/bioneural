@@ -107,6 +107,50 @@ class QState(nn.Module):
         self._pcache.clear()
 
     # ------------------------------------------------------------------
+    def _toeplitz(self, adj: bool = False, backward: bool = False) -> torch.Tensor:
+        """Block-Toeplitz convolution matrix T (nb, 2C, 2C): the cross-lag convolution becomes
+        one batched matmul T @ r̃ (r̃ interleaves the 2 qubit dims across the C positions:
+        index = pos·2 + dim). Two orientations: forward (h[j] = Σ_{i≤j} P[j-i]·r[i],
+        lower-triangular) and backward (G[s] = Σ_{t≥s} P[t-s]·r[t], upper-triangular — the
+        adjoint scan's r-gradient). Fully vectorized via the closed-form block powers
+        P[j] = a^j·[[cos(jθ), sin(jθ)e^{iφ}], [-sin(jθ)e^{-iφ}, cos(jθ)]]; T depends only on R,
+        so it is cached and rebuilt only when the angles change."""
+        key = ("T", self.R.device, adj, backward)
+        if key in self._pcache:
+            return self._pcache[key]
+        C = self.chunk
+        rows = torch.arange(C, device=self.R.device)[:, None]  # (C,1) block row
+        cols = torch.arange(C, device=self.R.device)[None, :]  # (1,C) block col
+        if backward:
+            d = (cols - rows).clamp(min=0).float()  # (C,C), lag = t - s
+            mask = (rows <= cols).float()  # upper-triangular support
+        else:
+            d = (rows - cols).clamp(min=0).float()  # (C,C), lag = j - i
+            mask = (rows >= cols).float()  # lower-triangular support
+        th = self.theta.detach()[:, None, None]  # (nb,1,1)
+        dd = d[None]  # (1,C,C)
+        c = torch.cos(dd * th) * mask  # (nb,C,C)
+        s = torch.sin(dd * th) * mask
+        ep = torch.exp(1j * self.phi.detach())[:, None, None]  # (nb,1,1)
+        ad = (self.a**d[None]) * mask  # (1,C,C)
+        T = torch.zeros(self.nb, C, C, 2, 2, dtype=torch.complex64, device=self.R.device)
+        T[:, :, :, 0, 0] = c
+        T[:, :, :, 0, 1] = (-s * ep) if adj else (s * ep)
+        T[:, :, :, 1, 0] = (s * torch.conj(ep)) if adj else (-s * torch.conj(ep))
+        T[:, :, :, 1, 1] = c
+        T = T * ad[..., None, None]  # (nb,C,C,2,2)
+        T = T.permute(0, 1, 3, 2, 4).reshape(self.nb, 2 * C, 2 * C)  # (nb, 2C, 2C)
+        self._pcache[key] = T
+        return T
+
+    def _conv(self, r: torch.Tensor, adj: bool = False, backward: bool = False) -> torch.Tensor:
+        """Batched Toeplitz convolution over chunks. r is (M, C, nb, 2); forward:
+        Σ_{i≤j} P[j-i]·r[m, i]; backward: Σ_{t≥s} P[t-s]·r[m, t] (adjoint r-gradient)."""
+        T = self._toeplitz(adj, backward)
+        r̃ = r.permute(0, 2, 1, 3).reshape(r.shape[0], self.nb, 2 * self.chunk)  # (M, nb, 2C)
+        out = torch.einsum("blk,mbk->mbl", T, r̃)  # (M, nb, 2C)
+        return out.reshape(r.shape[0], self.nb, self.chunk, 2).permute(0, 2, 1, 3)
+
     def _powers(self, n: int) -> torch.Tensor:
         """Block-diagonal powers P[j] = a^j · R^j for j = 0..n-1, as (n, nb, 2, 2). Closed form:
         a 2x2 Givens-with-phase block satisfies R_b^j = [[cos(jθ), sin(jθ)e^{iφ}],
@@ -173,12 +217,8 @@ class QState(nn.Module):
         if M * C != w:
             r = torch.nn.functional.pad(r, (0, 0, 0, 0, 0, M * C - w))
         r = r.reshape(M, C, nb, 2)
-        P = self._powers(C + 1)  # (C+1, nb, 2, 2); input lags use [0:C], carry uses [1:]
-        h = torch.zeros(M, C, nb, 2, dtype=torch.complex64, device=e.device)
-        for j in range(C):
-            rr = r[:, : C - j].reshape(M * (C - j), nb, 2)
-            contrib = torch.einsum("bij,tbj->tbi", P[j], rr).reshape(M, C - j, nb, 2)
-            h[:, j:] += contrib
+        h = self._conv(r)  # one cached Toeplitz matmul instead of a 32-lag einsum loop
+        P = self._powers(C + 1)  # (C+1, nb, 2, 2); carry uses [1:]
         carry = self.h.clone().reshape(nb, 2)
         carry0 = carry  # the state BEFORE this window = h_{-1} for t=0 (needed for the R grad)
         for m in range(M):
@@ -271,13 +311,9 @@ class QState(nn.Module):
         if M * C != w:
             dj = torch.nn.functional.pad(dj, (0, 0, 0, 0, 0, M * C - w))
         dj = dj.reshape(M, C, nb, 2)
-        Padj = self._powers_adj(C + 1)
-        G = torch.zeros(M, C, nb, 2, dtype=torch.complex64, device=d.device)
-        for j in range(C):
-            dd = dj[:, j:].reshape(M * (C - j), nb, 2)
-            contrib = torch.einsum("bij,tbj->tbi", Padj[j], dd).reshape(M, C - j, nb, 2)
-            G[:, : C - j] += contrib
-        c = torch.einsum("mcbj,cbij->mbi", dj, Padj[1:])  # (M, nb, 2) = dL/dcarry_m (direct)
+        G = self._conv(dj, adj=True, backward=True)  # batched adjoint r-gradient (P†, upper-tri)
+        Padj = self._powers_adj(C + 1)  # carry terms use P†[1:], P†[C]
+        c = torch.einsum("mcbj,cbij->mbi", dj, Padj[1:])  # (M, nb, 2) = dL/dcarry_m
         acc = torch.zeros(nb, 2, dtype=torch.complex64, device=d.device)
         for m in reversed(range(M)):
             tail = torch.einsum("cbij,bj->cbi", torch.flip(Padj[:C], dims=[0]), acc)
