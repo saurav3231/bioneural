@@ -145,11 +145,15 @@ class QState(nn.Module):
             torch.zeros(max(0, self.taps - 1), self.nch, dim, dtype=torch.complex64),
         )
         # Frozen sparse random-feature (ELM) map before the head: nonlinear decode capacity
-        # with zero training cost (same trick as the linear EmbSSM's `hidden` option).
+        # with zero training cost (same trick as the linear EmbSSM's `hidden` option). The
+        # weights are scaled by 1/sqrt(active fan-in) so relu(feat·W_fix) stays O(1): unscaled
+        # ±1 over ~15%·fdim active dims gives pre ~ N(0, 7.6) on the phase features, and the
+        # head W_vocab diverges ~8x faster (measured: ssm ppl exploded to ~10^8 on Kaggle).
         if hidden > 0:
             mask = torch.rand(hidden, self.fdim, generator=g) < 0.15
             vals = torch.where(torch.rand(hidden, self.fdim, generator=g) < 0.5, 1.0, -1.0)
-            self.register_buffer("W_fix", (mask.float() * vals))
+            scale = (0.15 * self.fdim) ** 0.5
+            self.register_buffer("W_fix", (mask.float() * vals) / scale)
         self.chunk = 32  # closed-form scan chunk
 
         # torch.compile ONLY the real kernels (the head matmul and the real pairwise einsum).
